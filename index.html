@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZitiCam Nippon</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="description" content="Read manga on camera. The pages and the live-face ziti, recorded together in one take.">
+<meta name="theme-color" content="#17120e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Nippon">
+<link rel="apple-touch-icon" href="./icon-180.png">
+<link rel="icon" type="image/png" href="./icon-180.png">
+<link rel="manifest" href="./manifest.webmanifest">
+<style>
+  :root {
+    --bg: #17120e; --panel: rgba(33, 26, 20, .9); --panel-solid: #211a14; --line: #3a2d22;
+    --text: #f3e6cf; --muted: #b49f84; --gold: #e8b45a; --tomato: #c8432b; --basil: #7fbf6a;
+    --safe-t: env(safe-area-inset-top, 0px); --safe-b: env(safe-area-inset-bottom, 0px);
+    --safe-l: env(safe-area-inset-left, 0px); --safe-r: env(safe-area-inset-right, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none; touch-action: none; overscroll-behavior: none; }
+  button { font: inherit; color: inherit; border: 0; background: none; padding: 0; cursor: pointer; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, label.btn:focus-within { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+  /* the stage: exactly what gets recorded */
+  #stage { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; object-fit: contain; display: block; background: #000; }
+  video#cam { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  #touch { position: fixed; inset: 0; z-index: 2; touch-action: none; cursor: default; }
+  #pipBox { position: fixed; left: 0; top: 0; z-index: 3; pointer-events: none; border: 1.5px dashed rgba(232,180,90,.75); border-radius: 12px; display: none; }
+  #pipBox::after { content: ""; position: absolute; right: -7px; bottom: -7px; width: 22px; height: 22px; border-radius: 50%;
+    background: var(--gold); box-shadow: 0 2px 8px rgba(0,0,0,.5); border: 2px solid #24180c; }
+  body.recording #pipBox { border-color: rgba(232,180,90,.35); }
+  body.recording #pipBox::after { opacity: .55; }
+  body.clean #pipBox, body.clean .bar, body.clean #status { display: none !important; }
+
+  /* chrome around it (never recorded) */
+  .bar { position: fixed; left: 0; right: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+    padding-left: calc(14px + var(--safe-l)); padding-right: calc(14px + var(--safe-r)); pointer-events: none; z-index: 5; }
+  .bar > * { pointer-events: auto; }
+  #top { top: 0; padding-top: calc(10px + var(--safe-t)); }
+  #bottom { bottom: 0; padding-bottom: calc(18px + var(--safe-b)); align-items: center; }
+  .chip { min-height: 40px; padding: 8px 14px; border-radius: 999px; background: var(--panel);
+    border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 600; font-size: 14px;
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); white-space: nowrap; }
+  .chip[aria-pressed="false"] { color: var(--muted); }
+  .chip[hidden] { display: none; }
+  .side { display: flex; flex-direction: column; gap: 10px; min-width: 96px; }
+  .side.right { align-items: flex-end; }
+  .side.left { align-items: flex-start; }
+  .mid { display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; }
+  .mid > * { pointer-events: auto; }
+  .arrow { width: 60px; height: 60px; border-radius: 50%; font-size: 28px; font-weight: 500; padding: 0; line-height: 1; }
+  .center { display: flex; align-items: center; gap: 14px; }
+
+  #rec { width: 78px; height: 78px; border-radius: 50%; border: 4px solid var(--text); display: grid; place-items: center;
+    background: rgba(23,18,14,.35); flex: none; }
+  #rec span { width: 58px; height: 58px; border-radius: 50%; background: var(--tomato); transition: all .18s ease; }
+  body.recording #rec span { width: 30px; height: 30px; border-radius: 8px; }
+  #rec:disabled { opacity: .4; }
+  #pauseBtn { width: 48px; height: 48px; padding: 0; border-radius: 50%; display: none; }
+  body.recording #pauseBtn { display: inline-flex; }
+  #pauseBtn svg { width: 18px; height: 18px; fill: var(--text); }
+  body.paused #pauseBtn { background: var(--gold); }
+  body.paused #pauseBtn svg { fill: #24180c; }
+  .center .spacer { width: 48px; }
+  body.recording .center .spacer { display: none; }
+
+  #timer { display: none; font-variant-numeric: tabular-nums; font-weight: 700; }
+  #timer::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--tomato); display: inline-block; animation: blink 1s steps(2) infinite; }
+  body.paused #timer::before { animation: none; background: var(--gold); }
+  @keyframes blink { 50% { opacity: .2; } }
+  body.recording #timer { display: inline-flex; }
+  body.recording .hide-rec { display: none; }
+  #pageChip { font-variant-numeric: tabular-nums; }
+
+  #status { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(118px + var(--safe-b)); z-index: 5;
+    font-size: 13px; color: var(--muted); background: var(--panel); border: 1px solid var(--line); padding: 6px 12px; border-radius: 999px; display: none; white-space: nowrap; }
+  #status.show { display: block; }
+
+  #toast { position: fixed; left: 50%; bottom: calc(120px + var(--safe-b)); transform: translate(-50%, 8px); opacity: 0;
+    transition: all .2s ease; z-index: 60; background: var(--panel-solid); border: 1px solid var(--line); border-radius: 14px;
+    padding: 10px 14px; max-width: min(88vw, 380px); text-align: center; font-size: 14px; pointer-events: none; }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  #count { position: fixed; inset: 0; display: none; place-items: center; z-index: 20; pointer-events: none;
+    font-size: 132px; font-weight: 800; color: var(--text); text-shadow: 0 6px 30px rgba(0,0,0,.6); }
+  #count.show { display: grid; }
+
+  #drop { position: fixed; inset: 12px; z-index: 70; border: 3px dashed var(--gold); border-radius: 22px; background: rgba(23,18,14,.82);
+    display: none; place-items: center; font-size: 22px; font-weight: 700; pointer-events: none; }
+  body.dragging #drop { display: grid; }
+
+  #debug { position: fixed; left: calc(10px + var(--safe-l)); top: calc(110px + var(--safe-t)); z-index: 6; max-width: 70vw;
+    font: 11.5px/1.45 ui-monospace, Menlo, monospace; color: var(--text); background: rgba(20,14,10,.82);
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; white-space: pre-wrap; display: none; pointer-events: none; }
+  body.debug #debug { display: block; }
+
+  /* sheets */
+  .scrim { position: fixed; inset: 0; background: rgba(10,7,5,.55); z-index: 40; display: none; }
+  .scrim.show { display: block; }
+  .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 41; background: var(--panel-solid); border-top: 1px solid var(--line);
+    border-radius: 20px 20px 0 0; padding: 10px calc(18px + var(--safe-r)) calc(18px + var(--safe-b)) calc(18px + var(--safe-l));
+    max-height: 82vh; overflow-y: auto; transform: translateY(105%); transition: transform .25s ease; touch-action: pan-y;
+    width: min(100%, 560px); margin: 0 auto; }
+  .sheet.show { transform: translateY(0); }
+  #layout { max-height: 56vh; }
+  .grab { width: 40px; height: 5px; border-radius: 3px; background: var(--line); margin: 2px auto 12px; }
+  .sheet h2 { font-size: 17px; margin: 0 0 4px; }
+  .sheet .sub { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  .row { display: grid; grid-template-columns: 104px 1fr 44px; align-items: center; gap: 10px; min-height: 40px; }
+  .row label { font-size: 14px; }
+  .row output { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; }
+  input[type=range] { width: 100%; accent-color: var(--gold); height: 28px; }
+  .group { margin: 16px 0 8px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .toggles { display: flex; flex-wrap: wrap; gap: 8px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; flex-wrap: nowrap; max-width: 100%; }
+  .seg button { padding: 9px 13px; font-weight: 600; font-size: 14px; color: var(--muted); min-height: 40px; }
+  .seg button[aria-pressed="true"] { background: var(--gold); color: #24180c; }
+  .line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .line .lbl { width: 88px; font-size: 14px; }
+  .swatches { display: inline-flex; gap: 8px; }
+  .swatches button { width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--line); }
+  .swatches button[aria-pressed="true"] { border-color: var(--text); box-shadow: 0 0 0 2px var(--gold); }
+  .actions { display: flex; gap: 10px; margin-top: 16px; }
+  .btn { flex: 1; min-height: 48px; border-radius: 14px; font-weight: 700; background: var(--line); display: inline-flex; align-items: center; justify-content: center; text-align: center; padding: 0 12px; }
+  .btn.primary { background: var(--gold); color: #24180c; }
+  .btn.ghost { background: transparent; border: 1px solid var(--line); }
+  .btn input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  label.btn { position: relative; cursor: pointer; }
+
+  .sources { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .sources .btn { flex-direction: column; min-height: 76px; gap: 2px; }
+  .sources .btn small { font-weight: 500; font-size: 12px; color: var(--muted); }
+  textarea { width: 100%; min-height: 72px; resize: vertical; border-radius: 12px; border: 1px solid var(--line); background: #17120e;
+    color: var(--text); font: 14px/1.4 ui-monospace, Menlo, monospace; padding: 10px; -webkit-user-select: text; user-select: text; touch-action: auto; }
+  #urlErr, #fileErr { color: #f0a08f; font-size: 13px; margin: 8px 0 0; display: none; }
+  #bookInfo { display: none; }
+  #bookInfo.show { display: block; }
+  #bookTitle { font-weight: 700; font-size: 16px; margin: 0 0 2px; overflow-wrap: anywhere; }
+  #loadBusy { display: none; color: var(--gold); font-size: 14px; margin-top: 10px; }
+  #loadBusy.show { display: block; }
+
+  #review video { display: block; max-height: min(52vh, 560px); max-width: 100%; margin: 0 auto; border-radius: 12px; background: #000; }
+  #reviewMeta { color: var(--muted); font-size: 13px; margin: 10px 0 0; text-align: center; }
+
+  body.prestart .bar, body.prestart #status, body.prestart #pipBox { visibility: hidden; }
+  #start { position: fixed; inset: 0; z-index: 50; display: grid; place-items: end center;
+    background: linear-gradient(to bottom, rgba(23,18,14,0) 25%, rgba(23,18,14,.92) 60%, var(--bg));
+    padding: 24px 24px calc(28px + var(--safe-b)); }
+  #start.gone { display: none; }
+  #start .card { width: min(100%, 440px); text-align: center; }
+  #start h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -.01em; }
+  #start h1 span { color: var(--tomato); }
+  #start p { color: var(--muted); margin: 0 0 18px; }
+  #start .btn { width: 100%; flex: none; }
+  #loadline { font-size: 13px; color: var(--muted); margin-top: 12px; min-height: 18px; }
+  #startErr { color: #f0a08f; font-size: 14px; margin-top: 10px; display: none; }
+  #noCamBtn { display: none; margin-top: 10px; }
+  kbd { font: 12px ui-monospace, Menlo, monospace; border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; color: var(--text); }
+  .keys { color: var(--muted); font-size: 13px; line-height: 1.9; }
+  @media (pointer: coarse) { .keys { display: none; } }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./three.module.min.js" } }
+</script>
+</head>
+<body class="prestart">
+<canvas id="stage" aria-label="Recording canvas: manga page with the ziti"></canvas>
+<video id="cam" playsinline muted autoplay></video>
+<div id="touch" aria-hidden="true"></div>
+<div id="pipBox" aria-hidden="true"></div>
+
+<div id="top" class="bar">
+  <div class="side left">
+    <button id="loadBtn" class="chip hide-rec">Open manga</button>
+  </div>
+  <div class="mid">
+    <span id="timer" class="chip" aria-live="off">0:00</span>
+    <button id="pageChip" class="chip" hidden aria-label="Go to page">–</button>
+  </div>
+  <div class="side right">
+    <button id="layoutBtn" class="chip">Layout</button>
+    <button id="lookBtn" class="chip hide-rec">Look</button>
+    <button id="takeBtn" class="chip hide-rec" hidden>Last take</button>
+  </div>
+</div>
+<div id="status"></div>
+<pre id="debug"></pre>
+
+<div id="bottom" class="bar">
+  <button id="leftBtn" class="chip arrow" aria-label="Page to the left">‹</button>
+  <div class="center">
+    <span class="spacer"></span>
+    <button id="rec" aria-label="Record" disabled><span></span></button>
+    <button id="pauseBtn" class="chip" aria-label="Pause recording"><svg viewBox="0 0 24 24" id="pauseIcon"><rect x="5" y="4" width="5" height="16" rx="1.5"/><rect x="14" y="4" width="5" height="16" rx="1.5"/></svg></button>
+  </div>
+  <button id="rightBtn" class="chip arrow" aria-label="Page to the right">›</button>
+</div>
+
+<div id="count">3</div>
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="drop">Drop manga here</div>
+
+<div id="scrim" class="scrim"></div>
+
+<section id="load" class="sheet" aria-label="Open manga">
+  <div class="grab"></div>
+  <div id="bookInfo">
+    <p id="bookTitle"></p>
+    <p class="sub" id="bookMeta"></p>
+    <div class="row">
+      <label for="pageSlider">Go to page</label>
+      <input type="range" id="pageSlider" min="1" max="1" step="1" value="1">
+      <output id="pageOut">1</output>
+    </div>
+    <div class="group">Open something else</div>
+  </div>
+  <h2 id="loadHead">Open a manga</h2>
+  <p class="sub">Pages stay on this device. Nothing is uploaded anywhere.</p>
+  <div class="sources">
+    <label class="btn primary">Files<small>images, .cbz, .zip, .pdf</small>
+      <input type="file" id="fileIn" multiple accept="image/*,.cbz,.zip,.pdf,.cbr,application/zip,application/pdf"></label>
+    <label class="btn">Folder<small>a chapter of images</small>
+      <input type="file" id="folderIn" webkitdirectory directory multiple></label>
+  </div>
+  <p id="fileErr"></p>
+  <div class="group">From a link</div>
+  <textarea id="urlIn" placeholder="https://…/chapter-1.cbz&#10;or image links, one per line&#10;or a range: https://…/{01-24}.jpg" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+  <p class="sub" style="margin:6px 0 0">Works with direct image links, .cbz / .zip / .pdf links, numbered ranges, and some gallery pages. Many manga sites block other apps; if a link fails, save the chapter and use Files.</p>
+  <p id="urlErr"></p>
+  <div id="loadBusy">Opening…</div>
+  <div class="actions">
+    <button class="btn ghost" id="closeLoad">Close</button>
+    <button class="btn primary" id="urlGo">Open link</button>
+  </div>
+  <p class="keys" style="margin-top:14px">You can also drop files or a folder anywhere on this window, or paste a link.</p>
+</section>
+
+<section id="layout" class="sheet" aria-label="Layout">
+  <div class="grab"></div>
+  <h2>Layout</h2>
+  <p class="sub">Drag the ziti to move it, pinch or pull the gold dot to resize. Works mid-recording.</p>
+  <div class="group">Ziti</div>
+  <div class="line">
+    <button class="chip" id="zitiOnBtn" aria-pressed="true">Ziti on</button>
+    <div class="seg" id="presetSeg" aria-label="Snap the ziti to a corner">
+      <button data-preset="tl" aria-label="Top left">↖</button>
+      <button data-preset="tr" aria-label="Top right">↗</button>
+      <button data-preset="bl" aria-label="Bottom left">↙</button>
+      <button data-preset="br" aria-label="Bottom right">↘</button>
+      <button data-preset="c" aria-label="Center">●</button>
+    </div>
+  </div>
+  <div class="row"><label for="pipSize">Size</label><input type="range" id="pipSize" min="0.12" max="1" step="0.01"><output id="pipSizeOut"></output></div>
+  <div class="line"><span class="lbl">Backdrop</span>
+    <div class="seg"><button data-k="backdrop" data-v="none">None</button><button data-k="backdrop" data-v="circle">Circle</button><button data-k="backdrop" data-v="card">Card</button></div>
+  </div>
+  <div class="line"><span class="lbl">Color</span>
+    <div class="swatches">
+      <button data-k="backdropColor" data-v="gold" style="background:#e8b45a" aria-label="Gold"></button>
+      <button data-k="backdropColor" data-v="paper" style="background:#f3e6cf" aria-label="Paper"></button>
+      <button data-k="backdropColor" data-v="ink" style="background:#17120e" aria-label="Ink"></button>
+      <button data-k="backdropColor" data-v="tomato" style="background:#c8432b" aria-label="Tomato"></button>
+    </div>
+  </div>
+  <div class="group">Pages</div>
+  <div class="line"><span class="lbl">Read</span>
+    <div class="seg"><button data-k="dir" data-v="rtl">Manga ←</button><button data-k="dir" data-v="ltr">Comic →</button></div>
+  </div>
+  <div class="line"><span class="lbl">Fit</span>
+    <div class="seg"><button data-k="fit" data-v="auto">Auto</button><button data-k="fit" data-v="page">Whole page</button><button data-k="fit" data-v="width">Width</button></div>
+  </div>
+  <div class="line"><span class="lbl">Page sits</span>
+    <div class="seg" id="alignSeg"><button data-k="align" data-v="start">Top</button><button data-k="align" data-v="center">Middle</button><button data-k="align" data-v="end">Bottom</button></div>
+  </div>
+  <div class="line"><span class="lbl">Turn</span>
+    <div class="seg"><button data-k="turnFx" data-v="slide">Slide</button><button data-k="turnFx" data-v="cut">Cut</button></div>
+  </div>
+  <div class="line"><span class="lbl">Behind</span>
+    <div class="seg"><button data-k="paper" data-v="ink">Ink</button><button data-k="paper" data-v="paper">Paper</button></div>
+  </div>
+  <div class="group">Video</div>
+  <div class="line"><span class="lbl">Shape</span>
+    <div class="seg"><button data-k="shape" data-v="tall">9:16</button><button data-k="shape" data-v="wide">16:9</button><button data-k="shape" data-v="square">1:1</button></div>
+  </div>
+  <div class="line"><span class="lbl">Size</span>
+    <div class="seg"><button data-k="quality" data-v="720">720p</button><button data-k="quality" data-v="1080">1080p</button></div>
+  </div>
+  <div class="actions"><button class="btn primary" id="closeLayout">Done</button></div>
+  <p class="keys" style="margin-top:14px">
+    <kbd>←</kbd> <kbd>→</kbd> turn pages · <kbd>Space</kbd> next · <kbd>R</kbd> record · <kbd>P</kbd> pause · <kbd>H</kbd> hide controls · <kbd>Z</kbd> ziti on/off · scroll over the ziti to resize · <kbd>Ctrl</kbd>+scroll to zoom the page
+  </p>
+</section>
+
+<section id="look" class="sheet" aria-label="Look settings">
+  <div class="grab"></div>
+  <h2>Look</h2>
+  <p class="sub">Same tuning as ZitiCam Pocket. Saved on this device.</p>
+  <div class="actions" style="margin-top:0"><button class="btn" id="straightBtn">Set straight</button></div>
+  <div id="sliders"></div>
+  <div class="group">Options</div>
+  <div class="toggles">
+    <button class="chip" data-toggle="sauce" aria-pressed="true">Sauce</button>
+    <button class="chip" data-toggle="brows" aria-pressed="false">Eyebrows</button>
+    <button class="chip" data-toggle="flip" aria-pressed="true">Flip</button>
+    <button class="chip" data-toggle="mirror" aria-pressed="false">Mirror</button>
+    <button class="chip" data-toggle="countdown" aria-pressed="true">3-2-1</button>
+    <button class="chip" data-toggle="debug" aria-pressed="false">Stats</button>
+  </div>
+  <div class="group">Mic</div>
+  <div class="seg"><button data-k="micMode" data-v="clean">Clean</button><button data-k="micMode" data-v="voice">Voice</button></div>
+  <p class="sub" style="margin:8px 0 0">Clean records your real voice. Voice turns on call-style cleanup, for loud places.</p>
+  <div class="actions">
+    <button class="btn ghost" id="resetLook">Reset to stream look</button>
+    <button class="btn primary" id="closeLook">Done</button>
+  </div>
+</section>
+
+<section id="review" class="sheet" aria-label="Review take">
+  <div class="grab"></div>
+  <video id="reviewVideo" playsinline controls loop></video>
+  <p id="reviewMeta"></p>
+  <div class="actions">
+    <button class="btn ghost" id="discardBtn">Delete</button>
+    <button class="btn primary" id="shareBtn">Save / Share</button>
+  </div>
+  <div class="actions" style="margin-top:10px">
+    <button class="btn ghost" id="downloadBtn">Download file</button>
+    <button class="btn" id="keepBtn">Done</button>
+  </div>
+</section>
+
+<div id="start">
+  <div class="card">
+    <h1>ZitiCam <span>Nippon</span></h1>
+    <p>Read manga on camera. The pages and your live-face ziti, recorded together in one take. No editing after.</p>
+    <button class="btn primary" id="startBtn">Start camera</button>
+    <button class="btn ghost" id="noCamBtn">Continue without camera</button>
+    <div id="loadline">Loading the ziti…</div>
+    <div id="startErr"></div>
+  </div>
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
