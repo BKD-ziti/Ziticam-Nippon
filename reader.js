@@ -10,6 +10,9 @@ const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'bas
 const ext = (name) => (name.match(/\.([a-z0-9]+)$/i)?.[1] || '').toLowerCase();
 const stem = (name) => name.split('/').pop().replace(/\.[a-z0-9]+$/i, '');
 
+// PDF pages are drawn at this size; the app raises it for 4K
+export const renderTarget = { maxSide: 2400 };
+
 export const BLOCKED_MSG = 'That site doesn\'t let other apps load its pages. Save the pages (or the chapter as a .cbz / .zip) and use Files instead.';
 
 function loadScript(src) {
@@ -121,7 +124,7 @@ async function pdfPages(blob, book) {
       async load() {
         const page = await doc.getPage(n);
         const vp1 = page.getViewport({ scale: 1 });
-        const scale = Math.min(4, 2400 / Math.max(vp1.width, vp1.height));
+        const scale = Math.min(5, renderTarget.maxSide / Math.max(vp1.width, vp1.height));
         const vp = page.getViewport({ scale });
         const c = document.createElement('canvas');
         c.width = Math.round(vp.width); c.height = Math.round(vp.height);

@@ -10,7 +10,7 @@ Open a chapter, put the noodle where you want it, hit record, and talk. The vide
 
 ### [Open ZitiCam Nippon](https://bkd-ziti.github.io/Ziticam-Nippon/)
 
-![version 0.1.0](https://img.shields.io/badge/version-0.1.0-e8b45a?style=flat-square)
+![version 0.2.0](https://img.shields.io/badge/version-0.2.0-e8b45a?style=flat-square)
 ![runs on phone and PC](https://img.shields.io/badge/runs_on-phone_and_PC-c8432b?style=flat-square)
 ![works offline](https://img.shields.io/badge/works-offline-7fbf6a?style=flat-square)
 ![nothing uploaded](https://img.shields.io/badge/nothing-uploaded-b49f84?style=flat-square)
@@ -73,7 +73,17 @@ The ziti is drawn on a transparent layer and placed straight onto the page, so t
 | **16:9** | YouTube | the page sits left, the ziti gets the whole right side |
 | **1:1** | feed posts | the page in the middle, the ziti tucked in a corner |
 
-Each shape remembers its own ziti spot and size, so switching back and forth doesn't undo your setup. Record at **1080p** for posting, **720p** if an older phone runs warm.
+Each shape remembers its own ziti spot and size, so switching back and forth doesn't undo your setup.
+
+| size | frame rate | best for | roughly |
+| --- | --- | --- | --- |
+| **720p** | 30 / 60 | older phones, long takes | 39 / 57 MB a minute |
+| **1080p** | 30 / 60 | everyday posting; the safe default | 61 / 91 MB a minute |
+| **4K** | 30 / 60 | YouTube on a strong PC or a recent iPhone | 151 / 226 MB a minute |
+
+**60 fps** makes page turns, zooms and the ziti's movement noticeably smoother. **4K** gives YouTube more to work with and keeps text crisp after compression, but a page can only be as sharp as its scan: a 1,500-pixel scan won't gain detail at 4K. PDFs are rendered at higher resolution automatically when 4K is on.
+
+Layout shows the exact size and a per-minute estimate for whatever you pick. If the device can't keep up, Nippon tells you once and suggests the next step down, rather than quietly recording stutter.
 
 ## what it opens
 
@@ -134,7 +144,7 @@ Tall pages (webtoons, or **Fit → Width**) scroll down before they turn.
 ## good to know
 
 - **Leaving the app mid-take:** on iPhone, switching apps finishes the take so it isn't lost. On a PC, switching tabs pauses it; come back and resume.
-- **Long takes:** the timer shows the file size as you go. Takes live in memory until you save them, so on a phone, save every 20 to 30 minutes of recording. Paused time takes no space.
+- **Long takes:** the timer shows the file size as you go. Takes live in memory until you save them, so on a phone, save every 20 to 30 minutes of recording at 1080p, or every 5 to 10 minutes at 4K. Paused time takes no space.
 - **The last take** stays available (top right) until you delete it or record a new one.
 - **Offline:** after one visit with a connection, the whole app, the ziti and the face tracker open with no signal. Manga you open from files works offline too; links need a connection.
 - **Privacy:** your camera feed, your face, your manga and your takes never leave your device. There's no account, no server and no tracking.
@@ -147,7 +157,8 @@ Tall pages (webtoons, or **Fit → Width**) scroll down before they turn.
 | the noodle doesn't follow your head | face the camera with even light, then **Look → Set straight** |
 | a link won't open | the site blocks outside apps; save the chapter and use **Files** |
 | a take is silent | allow the microphone for this site; the app warns you when it's off |
-| it feels slow | switch to **720p** in **Layout**, or close other apps and tabs |
+| it feels slow, or a warning says frames are dropping | step down in **Layout**: 4K → 1080p, then 60 → 30 fps, then 720p. Close other apps and tabs |
+| "couldn't record at that size" | that browser's video encoder doesn't support the setting; use 1080p or 30 fps |
 | settings don't stick | private / incognito windows don't keep settings; use a normal window |
 
 <details>
@@ -168,7 +179,7 @@ Tall pages (webtoons, or **Fit → Width**) scroll down before they turn.
 
 - **Face tracking:** Google MediaPipe Face Landmarker 0.10.35, bundled with the site so it works offline, with the CDN as a fallback. 478 face points plus a jaw-open score, every frame.
 - **The noodle:** three.js r169 rendering `ziti.glb` onto a transparent canvas, tuned identically to ZitiCam Pocket.
-- **The stage:** a single canvas composites the page and the ziti 30 times a second. The recorder captures that canvas plus your mic: H.264 MP4 where the browser supports it (Safari, Chrome), WebM where it doesn't.
+- **The stage:** a single canvas composites the page and the ziti 30 or 60 times a second, at 720p, 1080p or 4K. The recorder captures that canvas plus your mic: H.264 MP4 where the browser supports it (Safari, Chrome), asking for the H.264 level each size needs (4.0 up to 5.2 for 4K60), and WebM where MP4 isn't available.
 - **Manga:** JSZip for CBZ / ZIP and pdf.js for PDF, both bundled. Pages decode a few at a time, so a 200-page volume doesn't run a phone out of memory.
 - **No build step:** plain HTML, CSS and JavaScript. GitHub Pages serves it exactly as it sits in this repo.
 
@@ -192,6 +203,7 @@ Run it locally with any static server, e.g. `python3 -m http.server`, then open 
 ## what's next
 
 - [x] **v0.1:** manga + ziti in one take, live ziti placement, pause, works offline
+- [x] **v0.2:** 4K output and 60 fps
 - [ ] chapter markers: tap as you record, get timestamps for the video description
 - [ ] intro and outro cards with the series title, in BKDziti styling
 - [ ] spotlight: dim everything but the panel you're talking about

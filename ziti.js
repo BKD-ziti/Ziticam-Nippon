@@ -92,10 +92,10 @@ export function createZiti({ CFG, store, videoEl, mpBase, onChange = () => {} })
   world.add(rig);
   let sauceNode = null;
 
-  let size = [0, 0];
+  let size = [0, 0], maxH = 1080;
   function setSize(w, h) {
     // the ziti is drawn at about the size it appears in the video; snap to steps so live resizing stays cheap
-    const rh = Math.max(128, Math.min(1080, Math.round(h / 48) * 48));
+    const rh = Math.max(128, Math.min(maxH, Math.round(h / 48) * 48));
     const rw = Math.round(rh * ZITI_ASPECT);
     if (rw === size[0] && rh === size[1]) return;
     size = [rw, rh];
@@ -368,6 +368,7 @@ export function createZiti({ CFG, store, videoEl, mpBase, onChange = () => {} })
   applyLook();
   return {
     canvas, status, setSize, update, applyLook, straighten, startTracker,
+    setMaxHeight: (h) => { maxH = h; },
     resetFilters: () => filters.clear(),
     get landmarker() { return landmarker; },
     _internals: { onFace, insets, renderer, scene, camera, rig },

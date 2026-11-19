@@ -4,9 +4,9 @@
 // URL options: ?debug=1  ?autostart=1  ?manga=<link>  ?mp=<MediaPipe base url>  ?notrack=1
 
 import { createZiti, ZITI_ASPECT } from './ziti.js';
-import { bookFromFiles, bookFromUrl, filesFromInput, filesFromDrop } from './reader.js';
+import { bookFromFiles, bookFromUrl, filesFromInput, filesFromDrop, renderTarget } from './reader.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const q = new URLSearchParams(location.search);
 const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -20,7 +20,7 @@ const DEFAULTS = {
   eyes: 1.1, mouth: 1.24, mouthLift: 0.16, eyeLift: 0, eyeSpread: 0.94,
   turn: 1.15, sway: 0.45, bounce: 2, smooth: 0.5, zoom: 1, lift: 0,
   // video
-  shape: deskFirst ? 'wide' : 'tall', quality: 1080, paper: 'ink',
+  shape: deskFirst ? 'wide' : 'tall', quality: 1080, fps: 30, paper: 'ink',
   // pages
   dir: 'rtl', fit: 'auto', align: 'start', turnFx: reducedMotion ? 'cut' : 'slide',
   // ziti placement
@@ -34,7 +34,9 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode: keep going */ } },
 };
 const saved = store.get(STORE, {});
-const CFG = { ...DEFAULTS, ...saved, debug: q.get('debug') === '1', fps: 30 };
+const CFG = { ...DEFAULTS, ...saved, debug: q.get('debug') === '1' };
+if (![720, 1080, 2160].includes(CFG.quality)) CFG.quality = 1080;
+if (![30, 60].includes(CFG.fps)) CFG.fps = 30;
 CFG.pip = {};
 for (const k of Object.keys(PIP_DEFAULTS)) CFG.pip[k] = { ...PIP_DEFAULTS[k], ...(saved.pip?.[k] || {}) };
 const saveCfg = () => { const o = {}; for (const k of Object.keys(DEFAULTS)) o[k] = CFG[k]; store.set(STORE, o); };
@@ -66,9 +68,14 @@ const ziti = createZiti({ CFG, store, videoEl, mpBase: q.get('mp'), onChange: ()
 // ---------------------------------------------------------------- canvas size
 let W = 1080, H = 1920;
 function applyShape() {
-  const s = CFG.quality === 720 ? 720 : 1080, long = Math.round(s * 16 / 9);
+  const s = CFG.quality, long = Math.round(s * 16 / 9);
   [W, H] = CFG.shape === 'wide' ? [long, s] : CFG.shape === 'square' ? [s, s] : [s, long];
   stage.width = W; stage.height = H;
+  renderTarget.maxSide = s >= 2160 ? 3200 : 2400;
+  ziti.setMaxHeight(s >= 2160 ? 1680 : 1080);
+  mimeCache = null;
+  slowStrikes = 0; slowWarned = false;
+  updateVidHint();
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   if (cur) { initView(false); trans = null; }
@@ -531,7 +538,19 @@ function frame(now) {
   if (now - fpsT > 1000) {
     status.fps = fpsN * 1000 / (now - fpsT); status.camFps = ziti.status.camFrames * 1000 / (now - fpsT);
     ziti.status.camFrames = 0; fpsN = 0; fpsT = now;
+    checkPace();
     drawDebug();
+  }
+}
+// dropped frames show up as stutter in the video, so say so once instead of letting it happen quietly
+let slowStrikes = 0, slowWarned = false;
+function checkPace() {
+  if (!started || document.visibilityState !== 'visible' || slowWarned) return;
+  if (status.fps < CFG.fps * 0.8) slowStrikes++; else slowStrikes = Math.max(0, slowStrikes - 1);
+  if (slowStrikes >= 5) {
+    slowWarned = true;
+    const lower = CFG.quality === 2160 ? '1080p' : CFG.fps === 60 ? '30 fps' : '720p';
+    toast(`This device is drawing ${Math.round(status.fps)} of ${CFG.fps} frames a second here, so video may stutter. Try ${lower} in Layout.`, 6500);
   }
 }
 function drawDebug() {
@@ -539,7 +558,7 @@ function drawDebug() {
   const zs = ziti.status;
   $('debug').textContent =
     `ZitiCam Nippon ${VERSION}\n` +
-    `render ${status.fps.toFixed(1)} fps · camera ${status.camFps.toFixed(1)} fps\n` +
+    `render ${status.fps.toFixed(1)} / ${CFG.fps} fps · camera ${status.camFps.toFixed(1)} fps\n` +
     `detect ${zs.det.toFixed(1)} ms · tracker ${zs.tracker}${zs.trackerSrc ? ' (' + zs.trackerSrc + ')' : ''}\n` +
     `camera ${status.cam} · mic ${status.mic}\n` +
     (status.micInfo ? `mic ${CFG.micMode}: ${status.micInfo}\n` : '') +
@@ -549,23 +568,47 @@ function drawDebug() {
 }
 
 // ---------------------------------------------------------------- recording
-const MIMES = [
-  'video/mp4;codecs=avc1.640028,mp4a.40.2',
-  'video/mp4;codecs=avc1.4d0028,mp4a.40.2',
-  'video/mp4;codecs=avc1,mp4a.40.2',
-  'video/mp4',
-  'video/webm;codecs=vp9,opus',
-  'video/webm;codecs=vp8,opus',
-  'video/webm',
-];
+// H.264 levels cap size x frame rate: 4.0 = 1080p30, 4.2 = 1080p60, 5.1 = 4K30, 5.2 = 4K60
+function h264Levels() {
+  const mbs = Math.ceil(W / 16) * Math.ceil(H / 16), rate = mbs * CFG.fps;
+  const all = [['28', 8192, 245760], ['2a', 8704, 522240], ['33', 36864, 983040], ['34', 36864, 2073600]];
+  return all.filter(([, f, r]) => mbs <= f && rate <= r).map(([l]) => l);
+}
+function mimeList() {
+  const lv = h264Levels();
+  return [
+    ...lv.flatMap((l) => [`video/mp4;codecs=avc1.6400${l},mp4a.40.2`, `video/mp4;codecs=avc1.4d00${l},mp4a.40.2`]),
+    'video/mp4;codecs=avc1,mp4a.40.2',
+    'video/mp4',
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+  ];
+}
 let mimeCache = null;
 function pickMime() {
   if (mimeCache !== null) return mimeCache;
   if (typeof MediaRecorder === 'undefined') return (mimeCache = undefined);
   const forced = q.get('mime');
   if (forced && MediaRecorder.isTypeSupported(forced)) return (mimeCache = { mime: forced, ext: forced.startsWith('video/mp4') ? 'mp4' : 'webm' });
-  const m = MIMES.find((x) => { try { return MediaRecorder.isTypeSupported(x); } catch { return false; } });
+  const m = mimeList().find((x) => { try { return MediaRecorder.isTypeSupported(x); } catch { return false; } });
   return (mimeCache = m ? { mime: m, ext: m.startsWith('video/mp4') ? 'mp4' : 'webm' } : undefined);
+}
+// manga is mostly still, so these stay crisp while keeping long takes small enough to hold in memory
+function videoBitrate() {
+  const px = W * H, hi = CFG.fps === 60;
+  if (px >= 3840 * 2160 * 0.9) return hi ? 30_000_000 : 20_000_000;
+  if (px >= 1920 * 1080 * 0.9) return hi ? 12_000_000 : 8_000_000;
+  return hi ? 7_500_000 : 5_000_000;
+}
+function updateVidHint() {
+  const el = $('vidHint');
+  if (!el) return;
+  const mbMin = Math.round((videoBitrate() + 160_000) / 8 / 1e6 * 60);
+  let note = `${W} × ${H} at ${CFG.fps} fps · about ${mbMin} MB per minute of recording.`;
+  if (CFG.quality === 2160) note += IOS ? ' 4K on a phone: save often, and keep takes short.' : ' 4K needs a strong PC; if it stutters, step down.';
+  else if (CFG.fps === 60 && IOS) note += ' 60 fps works best on recent iPhones.';
+  el.textContent = note;
 }
 
 let recorder = null, recording = false, counting = false, chunks = [], bytes = 0;
@@ -581,11 +624,11 @@ function startRecording() {
   if (micStream) for (const t of micStream.getAudioTracks()) if (t.readyState === 'live') tracks.push(t);
   const micNote = tracks.length > 1 ? (CFG.micMode === 'voice' ? 'voice mic' : 'clean mic') : 'no sound';
   const stream = new MediaStream(tracks);
-  const vbps = Math.max(W, H) >= 1920 ? 8_000_000 : 5_000_000;   // pages are mostly still, so this stays crisp and keeps long takes in memory
-  try { recorder = new MediaRecorder(stream, { mimeType: pm.mime, videoBitsPerSecond: vbps, audioBitsPerSecond: 160_000 }); }
+  try { recorder = new MediaRecorder(stream, { mimeType: pm.mime, videoBitsPerSecond: videoBitrate(), audioBitsPerSecond: 160_000 }); }
   catch { recorder = new MediaRecorder(stream); }
   chunks = []; bytes = 0;
-  const shape = `${W}×${H}`;
+  const shape = `${W}×${H} · ${CFG.fps} fps`;
+  const startedAt = performance.now();
   recorder.ondataavailable = (e) => { if (e.data && e.data.size) { chunks.push(e.data); bytes += e.data.size; } };
   recorder.onstop = () => {
     for (const t of vStream.getVideoTracks()) t.stop();
@@ -597,7 +640,13 @@ function startRecording() {
     if (blob.size < 2000) { toast('That take came out empty. Try again, and give it a second before stopping.', 4500); return; }
     finishTake(blob, secs, type.includes('mp4') ? 'mp4' : 'webm', micNote, shape);
   };
-  recorder.onerror = (e) => { ziti.status.err = 'recorder: ' + (e.error?.message || e.name || 'error'); };
+  recorder.onerror = (e) => {
+    ziti.status.err = 'recorder: ' + (e.error?.message || e.name || 'error');
+    // an encoder that can't handle the size usually fails right away
+    if (performance.now() - startedAt < 5000 && (CFG.quality === 2160 || CFG.fps === 60)) {
+      toast('This device couldn\'t record at that size. Try 1080p or 30 fps in Layout.', 6000);
+    }
+  };
   recorder.start(1000);
   recording = true; paused = false; pausedTotal = 0; recStart = performance.now();
   document.body.classList.add('recording');
@@ -735,10 +784,14 @@ function closeSheets(quiet = false) {
 }
 
 function setOpt(k, v) {
-  if ((k === 'shape' || k === 'quality') && recording) { toast('Stop recording to change the video shape or size.'); return; }
+  if ((k === 'shape' || k === 'quality' || k === 'fps') && recording) { toast('Stop recording to change the video shape, size or frame rate.'); return; }
   if ((k === 'micMode') && (recording || counting)) return;
   CFG[k] = v;
-  if (k === 'shape' || k === 'quality') { applyShape(); boxKey = ''; }
+  if (k === 'shape' || k === 'quality' || k === 'fps') { applyShape(); boxKey = ''; }
+  if (k === 'quality' && v === 2160 && !store.get('nippon.seen4k', false)) {
+    store.set('nippon.seen4k', true);
+    toast('4K: sharpest on PC and recent iPhones. Pages look their best when the scans themselves are high resolution.', 6000);
+  }
   if (k === 'fit' || k === 'align') { if (cur) { clampView(goal); if (k === 'fit') initView(false); } }
   if (k === 'dir') syncBookInfo();
   if (k === 'zitiOn') { $('zitiOnBtn').setAttribute('aria-pressed', String(v)); boxKey = ''; }
