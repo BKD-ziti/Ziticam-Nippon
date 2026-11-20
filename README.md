@@ -10,7 +10,7 @@ Open a chapter, put the noodle where you want it, hit record, and talk. The vide
 
 ### [Open ZitiCam Nippon](https://bkd-ziti.github.io/Ziticam-Nippon/)
 
-![version 0.2.0](https://img.shields.io/badge/version-0.2.0-e8b45a?style=flat-square)
+![version 0.3.0](https://img.shields.io/badge/version-0.3.0-e8b45a?style=flat-square)
 ![runs on phone and PC](https://img.shields.io/badge/runs_on-phone_and_PC-c8432b?style=flat-square)
 ![works offline](https://img.shields.io/badge/works-offline-7fbf6a?style=flat-square)
 ![nothing uploaded](https://img.shields.io/badge/nothing-uploaded-b49f84?style=flat-square)
@@ -144,6 +144,8 @@ Tall pages (webtoons, or **Fit → Width**) scroll down before they turn.
 ## good to know
 
 - **Leaving the app mid-take:** on iPhone, switching apps finishes the take so it isn't lost. On a PC, switching tabs pauses it; come back and resume.
+- **The mic meter:** while you record, a small green bar next to the timer moves with your voice. If it moves, your voice is in the take. If no sound reaches the mic for a few seconds, Nippon tells you.
+- **Best audio on iPhone:** in Safari, tap **aA → Website Settings** and set **Microphone** to **Allow**. Nippon can then close the mic between takes, so playback sounds the way it was recorded instead of thin and "on a call".
 - **Long takes:** the timer shows the file size as you go. Takes live in memory until you save them, so on a phone, save every 20 to 30 minutes of recording at 1080p, or every 5 to 10 minutes at 4K. Paused time takes no space.
 - **The last take** stays available (top right) until you delete it or record a new one.
 - **Offline:** after one visit with a connection, the whole app, the ziti and the face tracker open with no signal. Manga you open from files works offline too; links need a connection.
@@ -156,7 +158,9 @@ Tall pages (webtoons, or **Fit → Width**) scroll down before they turn.
 | "Camera access is blocked" | allow Camera and Microphone for this site in your browser settings, then reload |
 | the noodle doesn't follow your head | face the camera with even light, then **Look → Set straight** |
 | a link won't open | the site blocks outside apps; save the chapter and use **Files** |
-| a take is silent | allow the microphone for this site; the app warns you when it's off |
+| a take is silent | allow the microphone for this site; watch the green mic meter next to the timer while recording |
+| playback sounds thin or garbled on iPhone | set **Microphone** to **Allow** for this site (**aA → Website Settings**), so the mic can close before playback |
+| "The mic was interrupted" | another app or a call grabbed the mic; Nippon reconnects it, and the take keeps going with a short gap |
 | it feels slow, or a warning says frames are dropping | step down in **Layout**: 4K → 1080p, then 60 → 30 fps, then 720p. Close other apps and tabs |
 | "couldn't record at that size" | that browser's video encoder doesn't support the setting; use 1080p or 30 fps |
 | settings don't stick | private / incognito windows don't keep settings; use a normal window |
@@ -179,7 +183,8 @@ Tall pages (webtoons, or **Fit → Width**) scroll down before they turn.
 
 - **Face tracking:** Google MediaPipe Face Landmarker 0.10.35, bundled with the site so it works offline, with the CDN as a fallback. 478 face points plus a jaw-open score, every frame.
 - **The noodle:** three.js r169 rendering `ziti.glb` onto a transparent canvas, tuned identically to ZitiCam Pocket.
-- **The stage:** a single canvas composites the page and the ziti 30 or 60 times a second, at 720p, 1080p or 4K. The recorder captures that canvas plus your mic: H.264 MP4 where the browser supports it (Safari, Chrome), asking for the H.264 level each size needs (4.0 up to 5.2 for 4K60), and WebM where MP4 isn't available.
+- **The stage:** pages, backdrop and ziti are drawn together in one GPU pass, 30 or 60 times a second, at 720p, 1080p or 4K. Nothing is copied between canvases, so moving or resizing the ziti mid-take costs next to nothing. Each page is uploaded to the GPU once, before its page turn starts, so turns don't hitch either. The recorder captures that canvas plus your mic: H.264 MP4 where the browser supports it (Safari, Chrome), asking for the H.264 level each size needs (4.0 up to 5.2 for 4K60), and WebM where MP4 isn't available.
+- **Audio:** the recorder records one steady audio line, and the mic plugs into it. If the device interrupts the mic mid-take, the take gets a moment of silence instead of a broken audio track, and the mic is reconnected. The camera is never restarted during a take, since that can cut the mic on iPhone.
 - **Manga:** JSZip for CBZ / ZIP and pdf.js for PDF, both bundled. Pages decode a few at a time, so a 200-page volume doesn't run a phone out of memory.
 - **No build step:** plain HTML, CSS and JavaScript. GitHub Pages serves it exactly as it sits in this repo.
 
@@ -189,6 +194,7 @@ Tall pages (webtoons, or **Fit → Width**) scroll down before they turn.
 | --- | --- |
 | `index.html` | the screen: stage, buttons, sheets |
 | `app.js` | the stage, page turning, gestures, recording |
+| `stage.js` | draws the page, backdrop and ziti together on the GPU |
 | `ziti.js` | the live-face ziti (shared design with Pocket) |
 | `reader.js` | opening files, folders, archives, PDFs and links |
 | `sw.js` | offline support |
@@ -204,6 +210,7 @@ Run it locally with any static server, e.g. `python3 -m http.server`, then open 
 
 - [x] **v0.1:** manga + ziti in one take, live ziti placement, pause, works offline
 - [x] **v0.2:** 4K output and 60 fps
+- [x] **v0.3:** smooth ziti moves mid-take, reliable audio, live mic meter
 - [ ] chapter markers: tap as you record, get timestamps for the video description
 - [ ] intro and outro cards with the series title, in BKDziti styling
 - [ ] spotlight: dim everything but the panel you're talking about

@@ -35,7 +35,8 @@ function imageFromUrl(url, cors) {
     const img = new Image();
     if (cors) img.crossOrigin = 'anonymous';
     img.decoding = 'async';
-    img.onload = () => res(img);
+    // decode off the main thread now, so putting the page on screen later is instant
+    img.onload = () => (img.decode ? img.decode().catch(() => {}) : Promise.resolve()).then(() => res(img));
     img.onerror = () => rej(new Error('image failed to load'));
     img.src = url;
   });

@@ -1,5 +1,5 @@
-// The live-face ziti: same model, tracker and tuning as ZitiCam Pocket, rendered on a
-// transparent canvas so it can sit on top of anything without a key color.
+// The live-face ziti: same model, tracker and tuning as ZitiCam Pocket, drawn straight onto
+// the stage over the page, so it never needs a key color.
 
 import * as THREE from 'three';
 import { GLTFLoader } from './GLTFLoader.js';
@@ -63,17 +63,9 @@ const insetFrag = /* glsl */`
     #include <colorspace_fragment>
   }`;
 
-export function createZiti({ CFG, store, videoEl, mpBase, onChange = () => {} }) {
+// renderer: the stage's renderer. The ziti draws straight into the stage at its spot, no copying.
+export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = () => {} }) {
   const status = { tracker: 'loading', trackerSrc: '', det: 0, face: false, err: '', ready: false, loadPct: 0, camFrames: 0 };
-
-  const canvas = document.createElement('canvas');
-  const renderer = new THREE.WebGLRenderer({
-    canvas, alpha: true, premultipliedAlpha: true, antialias: true, preserveDrawingBuffer: true, powerPreference: 'high-performance',
-  });
-  renderer.setPixelRatio(1);
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.NeutralToneMapping;
-  renderer.setClearColor(0x000000, 0);
 
   const scene = new THREE.Scene();
   const pmrem = new THREE.PMREMGenerator(renderer);
@@ -91,17 +83,6 @@ export function createZiti({ CFG, store, videoEl, mpBase, onChange = () => {} })
   rig.add(bob);
   world.add(rig);
   let sauceNode = null;
-
-  let size = [0, 0], maxH = 1080;
-  function setSize(w, h) {
-    // the ziti is drawn at about the size it appears in the video; snap to steps so live resizing stays cheap
-    const rh = Math.max(128, Math.min(maxH, Math.round(h / 48) * 48));
-    const rw = Math.round(rh * ZITI_ASPECT);
-    if (rw === size[0] && rh === size[1]) return;
-    size = [rw, rh];
-    renderer.setSize(rw, rh, false);
-  }
-  setSize(480, 640);
 
   function applyFraming() {
     camera.fov = 28 / Math.max(0.3, CFG.zoom);
@@ -324,7 +305,7 @@ export function createZiti({ CFG, store, videoEl, mpBase, onChange = () => {} })
   let lastVideoTime = -1;
   const curQuat = new THREE.Quaternion();
   const IDENT = new THREE.Quaternion();
-  function update(now, dt, draw = true) {
+  function update(now, dt, animate = true) {
     if (landmarker && videoEl.readyState >= 2 && videoEl.currentTime !== lastVideoTime) {
       lastVideoTime = videoEl.currentTime;
       status.camFrames++;
@@ -340,7 +321,7 @@ export function createZiti({ CFG, store, videoEl, mpBase, onChange = () => {} })
     } else if (!landmarker && videoEl.readyState >= 2) {
       snapshotFrame();
     }
-    if (!draw) return;
+    if (!animate) return;
 
     const tracking = now - target.seen < 500;
     const goal = tracking ? target.quat : IDENT;
@@ -355,6 +336,12 @@ export function createZiti({ CFG, store, videoEl, mpBase, onChange = () => {} })
     bob.scale.set(sxz + (bob.scale.x - sxz) * 0.5, sy + (bob.scale.y - sy) * 0.5, sxz + (bob.scale.z - sxz) * 0.5);
 
     applyInsets(now);
+  }
+
+  // draw into the stage's current frame; x, yTop, w, h in stage pixels (y measured from the top)
+  function renderInto(x, yTop, w, h, stageH) {
+    renderer.clearDepth();
+    renderer.setViewport(x, stageH - yTop - h, w, h);
     renderer.render(scene, camera);
   }
 
@@ -367,8 +354,7 @@ export function createZiti({ CFG, store, videoEl, mpBase, onChange = () => {} })
 
   applyLook();
   return {
-    canvas, status, setSize, update, applyLook, straighten, startTracker,
-    setMaxHeight: (h) => { maxH = h; },
+    status, update, renderInto, applyLook, straighten, startTracker,
     resetFilters: () => filters.clear(),
     get landmarker() { return landmarker; },
     _internals: { onFace, insets, renderer, scene, camera, rig },

@@ -77,6 +77,10 @@
   body.recording #timer { display: inline-flex; }
   body.recording .hide-rec { display: none; }
   #pageChip { font-variant-numeric: tabular-nums; }
+  #meter { width: 36px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; display: inline-block; }
+  #meter[hidden] { display: none; }
+  #meterFill { display: block; width: 100%; height: 100%; background: var(--basil); transform: scaleX(0); transform-origin: left; transition: transform .1s linear; }
+  body.paused #meterFill { background: var(--muted); }
 
   #status { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(118px + var(--safe-b)); z-index: 5;
     font-size: 13px; color: var(--muted); background: var(--panel); border: 1px solid var(--line); padding: 6px 12px; border-radius: 999px; display: none; white-space: nowrap; }
@@ -180,7 +184,7 @@
     <button id="loadBtn" class="chip hide-rec">Open manga</button>
   </div>
   <div class="mid">
-    <span id="timer" class="chip" aria-live="off">0:00</span>
+    <span id="timer" class="chip" aria-live="off"><span id="timerText">0:00</span><span id="meter" hidden title="Mic level"><i id="meterFill"></i></span></span>
     <button id="pageChip" class="chip" hidden aria-label="Go to page">–</button>
   </div>
   <div class="side right">

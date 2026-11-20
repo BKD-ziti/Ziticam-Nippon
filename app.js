@@ -4,9 +4,10 @@
 // URL options: ?debug=1  ?autostart=1  ?manga=<link>  ?mp=<MediaPipe base url>  ?notrack=1
 
 import { createZiti, ZITI_ASPECT } from './ziti.js';
+import { createStage } from './stage.js';
 import { bookFromFiles, bookFromUrl, filesFromInput, filesFromDrop, renderTarget } from './reader.js';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const q = new URLSearchParams(location.search);
 const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -50,7 +51,7 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 // ---------------------------------------------------------------- dom
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
-const ctx = stage.getContext('2d', { alpha: false });
+const comp = createStage(stage);
 const videoEl = $('cam');
 const touch = $('touch');
 const pipBox = $('pipBox');
@@ -63,21 +64,19 @@ function toast(msg, ms = 2800) {
 function setStatus(msg) { const s = $('status'); s.textContent = msg || ''; s.classList.toggle('show', !!msg); }
 
 // ---------------------------------------------------------------- the ziti
-const ziti = createZiti({ CFG, store, videoEl, mpBase: q.get('mp'), onChange: () => updateLoadline() });
+const ziti = createZiti({ renderer: comp.renderer, CFG, store, videoEl, mpBase: q.get('mp'), onChange: () => updateLoadline() });
 
 // ---------------------------------------------------------------- canvas size
 let W = 1080, H = 1920;
 function applyShape() {
   const s = CFG.quality, long = Math.round(s * 16 / 9);
   [W, H] = CFG.shape === 'wide' ? [long, s] : CFG.shape === 'square' ? [s, s] : [s, long];
-  stage.width = W; stage.height = H;
+  comp.setSize(W, H);
+  mapCache = null;
   renderTarget.maxSide = s >= 2160 ? 3200 : 2400;
-  ziti.setMaxHeight(s >= 2160 ? 1680 : 1080);
   mimeCache = null;
   slowStrikes = 0; slowWarned = false;
   updateVidHint();
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
   if (cur) { initView(false); trans = null; }
   const labels = CFG.shape === 'tall' ? ['Top', 'Middle', 'Bottom'] : ['Left', 'Middle', 'Right'];
   [...$('alignSeg').children].forEach((b, i) => { b.textContent = labels[i]; });
@@ -90,7 +89,7 @@ function pipRect() {
 }
 
 // ---------------------------------------------------------------- book + view
-let book = null, pageIdx = 0, cur = null, trans = null, goToken = 0;
+let book = null, pageIdx = 0, cur = null, trans = null, goToken = 0, nextImg = null;
 const view = { zoom: 1, cx: 0, cy: 0 };   // what's drawn
 const goal = { zoom: 1, cx: 0, cy: 0 };   // where it's easing to
 let gesturing = false;
@@ -145,11 +144,20 @@ async function goTo(i, side, atEnd = false) {
   const tok = ++goToken;
   const img = await book.get(i);
   if (tok !== goToken) return;
+  comp.prewarm(img);   // upload before the slide starts, so the turn itself never hitches
   const prev = cur && side && CFG.turnFx === 'slide' ? { img: cur.img, view: { ...view } } : null;
   pageIdx = i; cur = { img };
   initView(atEnd);
   trans = prev ? { ...prev, side, t0: performance.now() } : null;
+  nextImg = null;
+  comp.prune(new Set([img, prev?.img]));
   book.prefetch(i);
+  const ahead = i + 1;
+  if (ahead < book.length) {
+    book.get(ahead).then((n) => setTimeout(() => {
+      if (pageIdx === i && cur?.img === img) { nextImg = n; comp.prewarm(n); }
+    }, 450));
+  }
   $('pageChip').textContent = `${i + 1} / ${book.length}`;
   $('pageSlider').value = i + 1; $('pageOut').textContent = i + 1;
   saveProgress();
@@ -175,68 +183,54 @@ const actLeft = () => step(CFG.dir === 'rtl' ? 1 : -1);
 const actRight = () => step(CFG.dir === 'rtl' ? -1 : 1);
 
 // ---------------------------------------------------------------- drawing
-function drawPage(img, v, offX) {
+function placePage(img, v, offX) {
   const { dw, dh } = metrics(v, img);
-  ctx.drawImage(img.src, v.cx - dw / 2 + offX, v.cy - dh / 2, dw, dh);
-}
-function drawEmpty() {
-  const c = PAPER[CFG.paper];
-  const r = Math.min(W, H) * 0.16;
-  ctx.fillStyle = '#c8432b';
-  ctx.globalAlpha = 0.9;
-  ctx.beginPath(); ctx.arc(W / 2, H * 0.4, r, 0, Math.PI * 2); ctx.fill();
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = c.fg; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.font = `700 ${Math.round(r * 0.42)}px system-ui, sans-serif`;
-  ctx.fillText('Open a manga to begin', W / 2, H * 0.4 + r * 1.6);
-}
-function drawBackdrop(r) {
-  ctx.save();
-  ctx.fillStyle = BACKDROP[CFG.backdropColor] || BACKDROP.gold;
-  ctx.shadowColor = 'rgba(0,0,0,.35)'; ctx.shadowBlur = r.w * 0.08; ctx.shadowOffsetY = r.w * 0.02;
-  ctx.beginPath();
-  if (CFG.backdrop === 'circle') ctx.arc(r.x + r.w / 2, r.y + r.h * 0.52, r.h * 0.42, 0, Math.PI * 2);
-  else if (ctx.roundRect) ctx.roundRect(r.x, r.y, r.w, r.h, r.w * 0.09);
-  else ctx.rect(r.x, r.y, r.w, r.h);
-  ctx.fill();
-  ctx.restore();
+  return { img, x: v.cx - dw / 2 + offX, y: v.cy - dh / 2, w: dw, h: dh };
 }
 const easeOut = (t) => 1 - Math.pow(1 - t, 3);
 function draw(now, dt) {
-  ctx.fillStyle = PAPER[CFG.paper].bg;
-  ctx.fillRect(0, 0, W, H);
-  if (!cur) drawEmpty();
-  else {
+  const pages = [];
+  if (cur) {
     if (!gesturing) {
       const k = 1 - Math.exp(-dt * 14);
       for (const key of ['zoom', 'cx', 'cy']) view[key] += (goal[key] - view[key]) * k;
     }
-    let done = true;
     if (trans) {
-      const e = easeOut(Math.min(1, (now - trans.t0) / 280));
+      const e = easeOut(clamp((now - trans.t0) / 280, 0, 1));
       if (e < 1) {
-        done = false;
         const sgn = trans.side === 'right' ? 1 : -1;
-        drawPage(trans.img, trans.view, -sgn * W * e);
-        drawPage(cur.img, view, sgn * W * (1 - e));
+        pages.push(placePage(trans.img, trans.view, -sgn * W * e), placePage(cur.img, view, sgn * W * (1 - e)));
       } else trans = null;
     }
-    if (done) drawPage(cur.img, view, 0);
+    if (!trans) pages.push(placePage(cur.img, view, 0));
   }
-  if (CFG.zitiOn) {
-    const r = pipRect();
-    if (CFG.backdrop !== 'none') drawBackdrop(r);
-    ctx.drawImage(ziti.canvas, r.x, r.y, r.w, r.h);
-  }
+  const r = CFG.zitiOn ? pipRect() : null;
+  comp.render({
+    paper: PAPER[CFG.paper],
+    pages,
+    backdrop: r && CFG.backdrop !== 'none' ? { mode: CFG.backdrop, color: BACKDROP[CFG.backdropColor] || BACKDROP.gold, rect: r } : null,
+  });
+  if (r) ziti.renderInto(r.x, r.y, r.w, r.h, H);
 }
 
 // the dashed frame you grab (DOM, so it never shows up in the video)
-let boxKey = '';
+let boxKey = '', mapCache = null;
+// measured once per resize, not on every touch move: reading layout mid-drag is what makes drags stutter
 function stageMap() {
+  if (mapCache) return mapCache;
   const r = stage.getBoundingClientRect();
   const k = Math.min(r.width / W, r.height / H);
-  return { k, ox: r.left + (r.width - W * k) / 2, oy: r.top + (r.height - H * k) / 2 };
+  return (mapCache = { k, ox: r.left + (r.width - W * k) / 2, oy: r.top + (r.height - H * k) / 2 });
 }
+const dropMap = () => { mapCache = null; boxKey = ''; };
+window.addEventListener('resize', dropMap);
+window.addEventListener('orientationchange', dropMap);
+if (window.ResizeObserver) new ResizeObserver(dropMap).observe(stage);
+stage.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault();
+  if (recording) stopRecording();
+  toast('The device reset its graphics. If the stage stays blank, reload the page.', 6000);
+});
 function updatePipBox() {
   if (!CFG.zitiOn) { if (boxKey !== 'off') { pipBox.style.display = 'none'; boxKey = 'off'; } return; }
   const { k, ox, oy } = stageMap();
@@ -471,22 +465,92 @@ function describeMic(track) {
 function micLive() { return !!micStream && micStream.getAudioTracks().some((t) => t.readyState === 'live'); }
 function releaseMic(force = false) {
   if (!micStream || (keepMicOpen && !force)) return;
+  unplugMic();
   for (const t of micStream.getTracks()) t.stop();
   micStream = null;
   status.mic = micGranted ? 'closed (opens when you record)' : status.mic;
+}
+async function micPermission() {
+  try { return (await navigator.permissions.query({ name: 'microphone' })).state; } catch { return 'unknown'; }
+}
+async function getMic() {
+  const s = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(), video: false });
+  micStream = s; micGranted = true; status.mic = 'on';
+  status.micInfo = describeMic(s.getAudioTracks()[0]);
+  watchMic();
 }
 async function openMic() {
   if (micLive()) return true;
   const t0 = performance.now();
   try {
-    const s = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(), video: false });
-    micStream = s; micGranted = true; status.mic = 'on';
-    status.micInfo = describeMic(s.getAudioTracks()[0]);
-    if (performance.now() - t0 > 1500) keepMicOpen = true;   // looked like a permission prompt: stop closing the mic between takes
+    await getMic();
+    // An open mic keeps an iPhone in call mode, which makes playback sound thin and garbled, so close it
+    // between takes. Only keep it open if this site asks for mic permission every time.
+    const perm = await micPermission();
+    keepMicOpen = perm === 'unknown' ? performance.now() - t0 > 3000 : perm !== 'granted';
+    if (keepMicOpen && !store.get('nippon.seenMicTip', false)) {
+      store.set('nippon.seenMicTip', true);
+      setTimeout(() => toast('Tip: set Microphone to "Allow" for this site in your browser settings. Takes then play back at full quality.', 6500), 3000);
+    }
     const vt = camStream?.getVideoTracks()[0];
-    if (camStream && (!vt || vt.readyState === 'ended')) await restartCamera();
+    if (camStream && (!vt || vt.readyState === 'ended')) {
+      await restartCamera();
+      if (!micLive()) await getMic();   // some iPhones drop the mic when the camera comes back
+    }
     return true;
   } catch (e) { status.mic = 'blocked (' + e.name + ')'; return false; }
+}
+
+// ---- the audio line: the recorder always records one steady track, and the mic plugs into it.
+// If the mic hiccups or gets reconnected mid-take, the video gets a moment of silence instead of a broken audio track.
+const AC = window.AudioContext || window.webkitAudioContext;
+let actx = null, bus = null, meter = null, meterBuf = null, micNode = null;
+function audioLine() {
+  if (!AC || q.get('rawmic') === '1') return null;
+  try {
+    if (!actx) {
+      actx = new AC();
+      bus = actx.createMediaStreamDestination();
+      // mic -> meter -> recorder: the meter sits in the path, so it shows exactly what's being recorded
+      meter = actx.createAnalyser(); meter.fftSize = 1024;
+      meter.connect(bus);
+      meterBuf = new Float32Array(meter.fftSize);
+    }
+    if (actx.state !== 'running') actx.resume().catch(() => {});
+    return actx;
+  } catch { return null; }
+}
+function plugMic() {
+  if (!actx || !micLive()) return false;
+  unplugMic();
+  try {
+    micNode = actx.createMediaStreamSource(micStream);
+    micNode.connect(meter);
+    return true;
+  } catch { micNode = null; return false; }
+}
+function unplugMic() { try { micNode?.disconnect(); } catch {} micNode = null; }
+function micLevel() {
+  if (!meter || !micNode) return 0;
+  meter.getFloatTimeDomainData(meterBuf);
+  let s = 0;
+  for (let i = 0; i < meterBuf.length; i++) s += meterBuf[i] * meterBuf[i];
+  return Math.sqrt(s / meterBuf.length);
+}
+function sleepAudio() { if (actx && actx.state === 'running') actx.suspend().catch(() => {}); }
+function watchMic() {
+  const t = micStream?.getAudioTracks()[0];
+  if (!t) return;
+  t.onmute = () => { status.mic = 'muted by the device'; };
+  t.onunmute = () => { status.mic = 'on'; };
+  t.onended = async () => {
+    if (!recording || micStream?.getAudioTracks()[0] !== t) return;
+    micStream = null;
+    if (status.audioPath !== 'line') { toast('The mic was cut off by the device. The rest of this take may be silent.', 5000); return; }
+    toast('The mic was interrupted. Reconnecting…', 2500);
+    try { await getMic(); plugMic(); toast('Mic back.', 1800); }
+    catch { toast('Couldn\'t get the mic back. Stop and start a new take.', 5000); }
+  };
 }
 async function startCamera() {
   let stream;
@@ -499,7 +563,7 @@ async function startCamera() {
   }
   attachCamera(stream.getVideoTracks());
   const at = stream.getAudioTracks()[0];
-  if (at) { status.micInfo = describeMic(at); micStream = new MediaStream([at]); releaseMic(); }
+  if (at) { status.micInfo = describeMic(at); micStream = new MediaStream([at]); releaseMic(true); }
 }
 function attachCamera(tracks) {
   camStream = new MediaStream(tracks);
@@ -510,8 +574,10 @@ function attachCamera(tracks) {
   tr?.addEventListener('ended', () => { status.cam = 'ended'; if (document.visibilityState === 'visible' && !restarting) restartCamera(); });
   tr?.addEventListener('mute', () => setTimeout(() => { if (tr.muted && tr.readyState === 'live' && document.visibilityState === 'visible' && !restarting && camStream?.getVideoTracks()[0] === tr) restartCamera(); }, 1500));
 }
-let restarting = false;
+let restarting = false, camRestartPending = false;
 async function restartCamera() {
+  // reopening the camera mid-take can cut the mic on iPhone, so wait for the take to finish
+  if (recording) { camRestartPending = true; return; }
   if (restarting) return;
   restarting = true;
   try { for (const t of camStream?.getTracks() || []) t.stop(); } catch {}
@@ -527,10 +593,6 @@ function frame(now) {
   if (now - lastFrame < 1000 / CFG.fps - 3) return;
   const dt = Math.min((now - lastFrame) / 1000, 0.1);
   lastFrame = now;
-  if (CFG.zitiOn) {
-    const r = pipRect();
-    ziti.setSize(r.w, r.h);
-  }
   ziti.update(now, dt, CFG.zitiOn);
   draw(now, dt);
   updatePipBox();
@@ -562,7 +624,8 @@ function drawDebug() {
     `detect ${zs.det.toFixed(1)} ms · tracker ${zs.tracker}${zs.trackerSrc ? ' (' + zs.trackerSrc + ')' : ''}\n` +
     `camera ${status.cam} · mic ${status.mic}\n` +
     (status.micInfo ? `mic ${CFG.micMode}: ${status.micInfo}\n` : '') +
-    `output ${W}x${H} · ziti ${ziti.canvas.width}x${ziti.canvas.height}\n` +
+    `output ${W}x${H} · ziti ${Math.round(pipRect().w)}x${Math.round(pipRect().h)}\n` +
+    (status.level !== undefined ? `mic level ${(status.level * 100).toFixed(1)} · audio ${status.audioPath || '–'}\n` : '') +
     `recorder ${pickMime()?.mime || 'none'}\n` +
     `face ${zs.face ? 'yes' : 'no'}` + (status.rec ? `\n${status.rec}` : '') + (zs.err ? `\nerror ${zs.err}` : '');
 }
@@ -621,7 +684,9 @@ function startRecording() {
   if (!pm) { toast('This browser can\'t record video.'); return; }
   const vStream = stage.captureStream(CFG.fps);
   const tracks = [...vStream.getVideoTracks()];
-  if (micStream) for (const t of micStream.getAudioTracks()) if (t.readyState === 'live') tracks.push(t);
+  status.audioPath = '';
+  if (actx?.state === 'running' && plugMic()) { tracks.push(bus.stream.getAudioTracks()[0]); status.audioPath = 'line'; }
+  else if (micLive()) { tracks.push(micStream.getAudioTracks()[0]); status.audioPath = 'direct'; }
   const micNote = tracks.length > 1 ? (CFG.micMode === 'voice' ? 'voice mic' : 'clean mic') : 'no sound';
   const stream = new MediaStream(tracks);
   try { recorder = new MediaRecorder(stream, { mimeType: pm.mime, videoBitsPerSecond: videoBitrate(), audioBitsPerSecond: 160_000 }); }
@@ -636,7 +701,10 @@ function startRecording() {
     const blob = new Blob(chunks, { type });
     const secs = elapsed();
     chunks = [];
-    releaseMic();
+    // hand the audio back before playback: a live mic keeps iPhones in call mode, which mangles what you hear
+    unplugMic(); sleepAudio(); releaseMic();
+    status.level = undefined;
+    if (camRestartPending) { camRestartPending = false; restartCamera(); }
     if (blob.size < 2000) { toast('That take came out empty. Try again, and give it a second before stopping.', 4500); return; }
     finishTake(blob, secs, type.includes('mp4') ? 'mp4' : 'webm', micNote, shape);
   };
@@ -651,12 +719,25 @@ function startRecording() {
   recording = true; paused = false; pausedTotal = 0; recStart = performance.now();
   document.body.classList.add('recording');
   $('rec').setAttribute('aria-label', 'Stop recording');
+  let quietFor = 0, quietWarned = tracks.length < 2;
   const tick = () => {
     const mb = bytes / 1e6;
-    $('timer').textContent = `${fmt(elapsed())} · ${mb < 1000 ? mb.toFixed(0) + ' MB' : (mb / 1000).toFixed(2) + ' GB'}`;
-    status.rec = (paused ? 'paused ' : 'recording ') + $('timer').textContent;
+    $('timerText').textContent = `${fmt(elapsed())} · ${mb < 1000 ? mb.toFixed(0) + ' MB' : (mb / 1000).toFixed(2) + ' GB'}`;
+    status.rec = (paused ? 'paused ' : 'recording ') + $('timerText').textContent;
+    // the meter shows that sound is really reaching the take
+    const lv = micLevel();
+    status.level = lv;
+    $('meterFill').style.transform = `scaleX(${Math.min(1, Math.sqrt(lv) * 2.2).toFixed(3)})`;
+    if (status.audioPath === 'line' && !paused) {
+      quietFor = lv < 0.0015 ? quietFor + 0.25 : 0;
+      if (quietFor >= 8 && !quietWarned) {
+        quietWarned = true;
+        toast('No sound is reaching the mic. Check nothing is covering it and no other app is using it.', 6000);
+      }
+    }
   };
   tick(); timerT = setInterval(tick, 250);
+  $('meter').hidden = status.audioPath !== 'line';
   keepAwake();
 }
 function stopRecording() {
@@ -686,15 +767,19 @@ function togglePause() {
 }
 async function countdownThenRecord() {
   counting = true;
+  audioLine();   // must start inside the tap, or iPhones keep it switched off
   const micReady = status.mic === 'unavailable' ? Promise.resolve(false) : openMic();
   const el = $('count');
   if (CFG.countdown) {
     el.classList.add('show');
-    for (const n of [3, 2, 1]) { el.textContent = n; await new Promise((r) => setTimeout(r, 800)); if (!counting) { el.classList.remove('show'); releaseMic(); return; } }
+    for (const n of [3, 2, 1]) { el.textContent = n; await new Promise((r) => setTimeout(r, 800)); if (!counting) { el.classList.remove('show'); releaseMic(); sleepAudio(); return; } }
     el.classList.remove('show');
   }
   const ok = await micReady;
-  if (!counting) { releaseMic(); return; }
+  if (actx && actx.state !== 'running') {
+    await Promise.race([actx.resume().catch(() => {}), new Promise((r) => setTimeout(r, 1200))]);
+  }
+  if (!counting) { releaseMic(); sleepAudio(); return; }
   counting = false;
   if (!ok) toast('No mic, so this take is silent. Allow the microphone for this site to add sound.', 4500);
   startRecording();
@@ -754,7 +839,7 @@ document.addEventListener('visibilitychange', () => {
     // iPhone cuts the mic when you leave, so finish the take there; on a PC, just pause it
     if (recording && (IOS || !recorder?.pause)) stopRecording();
     else if (recording && !paused) { togglePause(); autoPaused = true; }
-    else if (!recording) releaseMic(true);
+    else if (!recording) { releaseMic(true); sleepAudio(); }
     counting = false;
   } else if (started) {
     keepAwake();
@@ -975,5 +1060,5 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 window.__zn = {
   CFG, ziti, status, step, goTo, setOpt, openBook, bookFromFiles, startRecording, stopRecording, togglePause, pipRect,
   get W() { return W; }, get H() { return H; }, get book() { return book; }, get pageIdx() { return pageIdx; },
-  get view() { return view; }, get take() { return take; }, get recording() { return recording; }, get trans() { return trans; },
+  get view() { return view; }, get take() { return take; }, get micStream() { return micStream; }, get actx() { return actx; }, get recording() { return recording; }, get trans() { return trans; },
 };
