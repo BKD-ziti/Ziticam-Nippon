@@ -7,7 +7,7 @@ import { createZiti, ZITI_ASPECT } from './ziti.js';
 import { createStage } from './stage.js';
 import { bookFromFiles, bookFromUrl, filesFromInput, filesFromDrop, renderTarget } from './reader.js';
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 const q = new URLSearchParams(location.search);
 const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -72,10 +72,11 @@ function applyShape() {
   const s = CFG.quality, long = Math.round(s * 16 / 9);
   [W, H] = CFG.shape === 'wide' ? [long, s] : CFG.shape === 'square' ? [s, s] : [s, long];
   comp.setSize(W, H);
+  comp.setZitiMax(s >= 2160 ? 1440 : 1080);
   mapCache = null;
   renderTarget.maxSide = s >= 2160 ? 3200 : 2400;
   mimeCache = null;
-  slowStrikes = 0; slowWarned = false;
+  resetSmooth();
   updateVidHint();
   if (cur) { initView(false); trans = null; }
   const labels = CFG.shape === 'tall' ? ['Top', 'Middle', 'Bottom'] : ['Left', 'Middle', 'Right'];
@@ -209,9 +210,12 @@ function draw(now, dt) {
     paper: PAPER[CFG.paper],
     pages,
     backdrop: r && CFG.backdrop !== 'none' ? { mode: CFG.backdrop, color: BACKDROP[CFG.backdropColor] || BACKDROP.gold, rect: r } : null,
+    // at 60 fps the face is only measured 30 times a second, so the noodle can be redrawn every other frame;
+    // the box itself still moves every frame
+    ziti: r ? { rect: r, draw: ziti.renderTo, redraw: (zitiTick++ % rung().every) === 0 } : null,
   });
-  if (r) ziti.renderInto(r.x, r.y, r.w, r.h, H);
 }
+let zitiTick = 0;
 
 // the dashed frame you grab (DOM, so it never shows up in the video)
 let boxKey = '', mapCache = null;
@@ -610,15 +614,44 @@ function frame(now) {
     status.workMax = 0;
   }
 }
-// dropped frames show up as stutter in the video, so say so once instead of letting it happen quietly
+// ---- staying smooth: if the device can't keep up, give up a little ziti quality before the video stutters.
+// Each step is checked: if it didn't actually help, it's undone (the limit is elsewhere) and the ziti stays at full quality.
+const LADDER = {
+  60: [{ every: 1, scale: 1 }, { every: 2, scale: 1 }, { every: 2, scale: 0.75 }, { every: 2, scale: 0.55 }],
+  30: [{ every: 1, scale: 1 }, { every: 1, scale: 0.75 }, { every: 1, scale: 0.55 }],
+};
+const smooth = { lvl: 0, bad: 0, good: 0, check: null, holdUntil: 0 };
+const rung = () => (LADDER[CFG.fps] || LADDER[30])[smooth.lvl] || LADDER[30][0];
+function setRung(l) { smooth.lvl = l; comp.setZitiScale(rung().scale); }
+function resetSmooth() { Object.assign(smooth, { bad: 0, good: 0, check: null, holdUntil: 0 }); setRung(0); slowStrikes = 0; slowWarned = false; }
 let slowStrikes = 0, slowWarned = false;
 function checkPace() {
-  if (!started || document.visibilityState !== 'visible' || slowWarned) return;
-  if (status.fps < CFG.fps * 0.8) slowStrikes++; else slowStrikes = Math.max(0, slowStrikes - 1);
-  if (slowStrikes >= 5) {
+  if (!started || document.visibilityState !== 'visible' || !CFG.zitiOn || openId) { smooth.bad = smooth.good = 0; return; }
+  const now = performance.now(), ratio = status.fps / CFG.fps, top = (LADDER[CFG.fps] || LADDER[30]).length - 1;
+  if (ratio < 0.9) { smooth.bad++; smooth.good = 0; } else if (ratio > 0.97) { smooth.good++; smooth.bad = 0; } else { smooth.bad = smooth.good = 0; }
+
+  if (smooth.check && now - smooth.check.at > 3000) {
+    const c = smooth.check; smooth.check = null;
+    if (c.dir === 'down' && status.fps < c.fps * 1.08) { setRung(c.from); smooth.holdUntil = now + 60000; }   // didn't help: undo
+    if (c.dir === 'up' && ratio < 0.9) { setRung(c.from); smooth.holdUntil = now + 60000; }                    // too much: go back
+  }
+  if (!smooth.check && now > smooth.holdUntil) {
+    if (smooth.bad >= 2 && smooth.lvl < top) {
+      smooth.check = { dir: 'down', from: smooth.lvl, fps: status.fps, at: now };
+      setRung(smooth.lvl + 1); smooth.bad = 0;
+    } else if (smooth.good >= 8 && smooth.lvl > 0) {
+      smooth.check = { dir: 'up', from: smooth.lvl, fps: status.fps, at: now };
+      setRung(smooth.lvl - 1); smooth.good = 0;
+    }
+  }
+
+  // still short with nothing left to give (or nothing that helps): say so once
+  if (slowWarned) return;
+  if (ratio < 0.8 && (smooth.lvl === top || now < smooth.holdUntil)) slowStrikes++; else slowStrikes = Math.max(0, slowStrikes - 1);
+  if (slowStrikes >= 4) {
     slowWarned = true;
-    const lower = CFG.quality === 2160 ? '1080p' : CFG.fps === 60 ? '30 fps' : '720p';
-    toast(`This device is drawing ${Math.round(status.fps)} of ${CFG.fps} frames a second here, so video may stutter. Try ${lower} in Layout.`, 6500);
+    const lower = CFG.fps === 60 ? '30 fps' : CFG.quality === 2160 ? '1080p' : '720p';
+    toast(`Holding ${Math.round(status.fps)} of ${CFG.fps} frames a second. If Low Power Mode is on, turn it off (it caps the screen at 30). Otherwise try ${lower} in Layout.`, 7500);
   }
 }
 function drawDebug() {
@@ -632,6 +665,7 @@ function drawDebug() {
     `camera ${status.cam} · mic ${status.mic}\n` +
     (status.micInfo ? `mic ${CFG.micMode}: ${status.micInfo}\n` : '') +
     `output ${W}x${H} · ziti ${Math.round(pipRect().w)}x${Math.round(pipRect().h)}\n` +
+    `smoothness step ${smooth.lvl} · ziti redrawn every ${rung().every === 1 ? 'frame' : rung().every + ' frames'} at ${Math.round(rung().scale * 100)}%${smooth.holdUntil > performance.now() ? ' · holding' : ''}\n` +
     (status.level !== undefined ? `mic level ${(status.level * 100).toFixed(1)} · audio ${status.audioPath || '–'}\n` : '') +
     `recorder ${pickMime()?.mime || 'none'}\n` +
     `face ${zs.face ? 'yes' : 'no'}` + (status.rec ? `\n${status.rec}` : '') + (zs.err ? `\nerror ${zs.err}` : '');
@@ -676,9 +710,45 @@ function updateVidHint() {
   if (!el) return;
   const mbMin = Math.round((videoBitrate() + 160_000) / 8 / 1e6 * 60);
   let note = `${W} × ${H} at ${CFG.fps} fps · about ${mbMin} MB per minute of recording.`;
-  if (CFG.quality === 2160) note += IOS ? ' 4K on a phone: save often, and keep takes short.' : ' 4K needs a strong PC; if it stutters, step down.';
-  else if (CFG.fps === 60 && IOS) note += ' 60 fps works best on recent iPhones.';
+  if (disk.ok) note += ' Takes save straight to this device\'s storage as you record, so long takes are fine.';
+  else if (CFG.quality === 2160) note += ' This browser holds takes in memory: save every few minutes at 4K.';
+  if (CFG.fps === 60) note += ' If your phone dips, Nippon eases off the ziti\'s detail first so the video stays smooth.';
   el.textContent = note;
+}
+
+// ---- takes go straight to this device's storage where the browser allows it: no memory limit on long 4K takes,
+// and the last take survives the app being closed or crashing. Otherwise they're held in memory as before.
+const disk = { w: null, ok: false, seq: 0, wait: new Map() };
+function diskCall(msg) {
+  return new Promise((res, rej) => { const id = ++disk.seq; disk.wait.set(id, { res, rej }); disk.w.postMessage({ ...msg, id }); });
+}
+const takesDir = async () => (await navigator.storage.getDirectory()).getDirectoryHandle('takes', { create: true });
+const diskFile = async (name) => (await (await takesDir()).getFileHandle(name)).getFile();
+async function initDisk() {
+  if (q.get('memrec') === '1' || !navigator.storage?.getDirectory || typeof Worker === 'undefined') return;
+  try {
+    disk.w = new Worker('./take-writer.js');
+    disk.w.onmessage = (e) => { const m = e.data, p = disk.wait.get(m.id); if (!p) return; disk.wait.delete(m.id); if (m.ok) p.res(m); else p.rej(new Error(m.err)); };
+    await Promise.race([diskCall({ type: 'probe' }), new Promise((_, rej) => setTimeout(() => rej(new Error('storage check timed out')), 5000))]);
+    disk.ok = true;
+    navigator.storage.persist?.().catch(() => {});
+  } catch (e) { disk.ok = false; status.diskErr = String(e.message || e); }
+  updateVidHint();
+  if (disk.ok) recoverTake().catch(() => {});
+}
+async function recoverTake() {
+  const d = await takesDir(), names = [];
+  for await (const name of d.keys()) if (!name.startsWith('.')) names.push(name);
+  names.sort();
+  const latest = names.pop();
+  if (names.length) diskCall({ type: 'remove', names }).catch(() => {});
+  if (!latest || take || recording) return;
+  const f = await diskFile(latest);
+  if (f.size < 2000) { diskCall({ type: 'remove', names: [latest] }).catch(() => {}); return; }
+  const ext = latest.endsWith('.webm') ? 'webm' : 'mp4';
+  const blob = new Blob([f], { type: ext === 'mp4' ? 'video/mp4' : 'video/webm' });
+  take = { blob, url: URL.createObjectURL(blob), name: latest, ext, disk: latest, meta: `${(f.size / 1e6).toFixed(1)} MB · ${ext.toUpperCase()} · kept from your last session` };
+  $('takeBtn').hidden = false;
 }
 
 let recorder = null, recording = false, counting = false, chunks = [], bytes = 0;
@@ -701,19 +771,42 @@ function startRecording() {
   chunks = []; bytes = 0;
   const shape = `${W}×${H} · ${CFG.fps} fps`;
   const startedAt = performance.now();
-  recorder.ondataavailable = (e) => { if (e.data && e.data.size) { chunks.push(e.data); bytes += e.data.size; } };
-  recorder.onstop = () => {
+  const type = (recorder.mimeType || pm.mime).split(';')[0] || 'video/mp4';
+  const ext = type.includes('mp4') ? 'mp4' : 'webm';
+  const takeName = ['ziticam-nippon', slug(book?.title), stamp()].filter(Boolean).join('-') + '.' + ext;
+  const toDisk = disk.ok;
+  let diskFailed = false;
+  const diskFail = () => {
+    if (diskFailed) return;
+    diskFailed = true;
+    toast('Couldn\'t write to this device\'s storage (it may be full). Stopping here so the take so far is kept.', 6500);
+    stopRecording();
+  };
+  if (toDisk) diskCall({ type: 'open', name: takeName }).catch(diskFail);
+  recorder.ondataavailable = (e) => {
+    if (!e.data || !e.data.size) return;
+    bytes += e.data.size;
+    if (toDisk) { if (!diskFailed) diskCall({ type: 'chunk', blob: e.data }).catch(diskFail); }
+    else chunks.push(e.data);
+  };
+  recorder.onstop = async () => {
     for (const t of vStream.getVideoTracks()) t.stop();
-    const type = (recorder.mimeType || pm.mime).split(';')[0] || 'video/mp4';
-    const blob = new Blob(chunks, { type });
     const secs = elapsed();
-    chunks = [];
     // hand the audio back before playback: a live mic keeps iPhones in call mode, which mangles what you hear
     unplugMic(); sleepAudio(); releaseMic();
     status.level = undefined;
     if (camRestartPending) { camRestartPending = false; restartCamera(); }
-    if (blob.size < 2000) { toast('That take came out empty. Try again, and give it a second before stopping.', 4500); return; }
-    finishTake(blob, secs, type.includes('mp4') ? 'mp4' : 'webm', micNote, shape);
+    let blob = null;
+    if (toDisk) {
+      try { await diskCall({ type: 'close' }); blob = new Blob([await diskFile(takeName)], { type }); }
+      catch { blob = null; }
+    } else { blob = new Blob(chunks, { type }); chunks = []; }
+    if (!blob || blob.size < 2000) {
+      if (toDisk) diskCall({ type: 'remove', names: [takeName] }).catch(() => {});
+      toast('That take came out empty. Try again, and give it a second before stopping.', 4500);
+      return;
+    }
+    finishTake(blob, secs, ext, micNote, shape, toDisk ? takeName : '');
   };
   recorder.onerror = (e) => {
     ziti.status.err = 'recorder: ' + (e.error?.message || e.name || 'error');
@@ -797,10 +890,11 @@ function stamp() {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 const slug = (s) => (s || '').toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 40);
-function finishTake(blob, secs, ext, micNote, shape) {
+function finishTake(blob, secs, ext, micNote, shape, diskName = '') {
   if (take?.url) URL.revokeObjectURL(take.url);
-  const name = ['ziticam-nippon', slug(book?.title), stamp()].filter(Boolean).join('-') + '.' + ext;
-  take = { blob, url: URL.createObjectURL(blob), name, ext, meta: `${fmt(secs)} · ${(blob.size / 1e6).toFixed(1)} MB · ${shape} · ${ext.toUpperCase()} · ${micNote}` };
+  if (take?.disk && take.disk !== diskName) diskCall({ type: 'remove', names: [take.disk] }).catch(() => {});
+  const name = diskName || ['ziticam-nippon', slug(book?.title), stamp()].filter(Boolean).join('-') + '.' + ext;
+  take = { blob, url: URL.createObjectURL(blob), name, ext, disk: diskName, meta: `${fmt(secs)} · ${(blob.size / 1e6).toFixed(1)} MB · ${shape} · ${ext.toUpperCase()} · ${micNote}` };
   $('takeBtn').hidden = false;
   openReview();
 }
@@ -831,7 +925,11 @@ function downloadTake() {
 }
 function deleteTake() {
   closeSheets();
-  if (take) { URL.revokeObjectURL(take.url); take = null; }
+  if (take) {
+    URL.revokeObjectURL(take.url);
+    if (take.disk) diskCall({ type: 'remove', names: [take.disk] }).catch(() => {});
+    take = null;
+  }
   $('takeBtn').hidden = true;
   toast('Deleted.');
 }
@@ -855,7 +953,8 @@ document.addEventListener('visibilitychange', () => {
     if (camStream && (!tr || tr.readyState === 'ended')) restartCamera();
   }
 });
-window.addEventListener('beforeunload', (e) => { if (recording || take) { e.preventDefault(); e.returnValue = ''; } });
+// a take saved to storage survives a reload; one held in memory doesn't
+window.addEventListener('beforeunload', (e) => { if (recording || (take && !take.disk)) { e.preventDefault(); e.returnValue = ''; } });
 
 // ---------------------------------------------------------------- sheets + settings UI
 let openId = null;
@@ -1058,6 +1157,7 @@ requestAnimationFrame(frame);
   .then(() => { setStatus(''); updateLoadline(); })
   .catch((e) => { ziti.status.err = 'tracker: ' + (e.message || e); setStatus('Face tracker didn\'t load. Check your connection and reload.'); updateLoadline(); });
 if (q.get('autostart') === '1') start();
+initDisk();
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
@@ -1067,5 +1167,5 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 window.__zn = {
   CFG, ziti, status, step, goTo, setOpt, openBook, bookFromFiles, startRecording, stopRecording, togglePause, pipRect,
   get W() { return W; }, get H() { return H; }, get book() { return book; }, get pageIdx() { return pageIdx; },
-  get view() { return view; }, get take() { return take; }, get micStream() { return micStream; }, get actx() { return actx; }, get recording() { return recording; }, get trans() { return trans; },
+  get view() { return view; }, get take() { return take; }, get micStream() { return micStream; }, get actx() { return actx; }, disk, get smoothLevel() { return smooth.lvl; }, get recording() { return recording; }, get trans() { return trans; },
 };

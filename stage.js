@@ -28,13 +28,30 @@ const bdFrag = /* glsl */`
     #include <colorspace_fragment>
   }`;
 
+const zVert = /* glsl */`
+  varying vec2 vUv;
+  void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
+// the ziti image is premultiplied linear color; encode for the screen without darkening its soft edges
+const zFrag = /* glsl */`
+  uniform sampler2D uMap; uniform vec2 uUv;
+  varying vec2 vUv;
+  void main() {
+    vec4 c = texture2D(uMap, vUv * uUv);
+    if (c.a < 0.003) discard;
+    gl_FragColor = vec4(c.rgb / c.a, c.a);
+    #include <colorspace_fragment>
+    gl_FragColor.rgb *= gl_FragColor.a;
+  }`;
+
 export function createStage(canvas) {
+  // No anti-aliasing on the full frame: pages are straight-edged rectangles, and smoothing every pixel of a
+  // 4K frame 60 times a second is most of the graphics work. Only the ziti, which has curves, gets it (below).
   const renderer = new THREE.WebGLRenderer({
-    canvas, alpha: false, antialias: true, preserveDrawingBuffer: false, powerPreference: 'high-performance',
+    canvas, alpha: false, antialias: false, preserveDrawingBuffer: false, powerPreference: 'high-performance',
   });
   renderer.setPixelRatio(1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.NeutralToneMapping;   // for the ziti; pages opt out
+  renderer.toneMapping = THREE.NoToneMapping;   // the noodle applies its own (see ziti.js)
   renderer.autoClear = false;
   const maxTex = renderer.capabilities.maxTextureSize;
   const aniso = renderer.capabilities.getMaxAnisotropy();
@@ -64,6 +81,29 @@ export function createStage(canvas) {
   const backdrop = new THREE.Mesh(quad, bdMat);
   backdrop.frustumCulled = false; backdrop.renderOrder = 5; backdrop.visible = false;
   scene.add(backdrop);
+
+  // ---- the ziti's own image: 4x anti-aliased, sized to the ziti box (capped), stored as sRGB for precision.
+  // It's kept between frames, so moving the box never redraws the noodle, and at 60 fps it can be redrawn every other frame.
+  let zMax = 1080, zScale = 1, zRT = null, zLast = '';
+  function zitiTarget(w, h) {
+    // grow in 64 px steps and only shrink when much too big, so pinching the ziti rarely reallocates
+    const fits = zRT && zRT.width >= w && zRT.height >= h && zRT.width * zRT.height <= 2.2 * w * h;
+    if (fits) return zRT;
+    zRT?.dispose();
+    zRT = new THREE.WebGLRenderTarget(Math.ceil(w / 64) * 64, Math.ceil(h / 64) * 64, { samples: 4, depthBuffer: true, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+    zRT.texture.colorSpace = THREE.SRGBColorSpace;
+    zQuad.material.uniforms.uMap.value = zRT.texture;
+    zLast = '';
+    return zRT;
+  }
+  const zQuad = new THREE.Mesh(quad, new THREE.ShaderMaterial({
+    uniforms: { uMap: { value: null }, uUv: { value: new THREE.Vector2(1, 1) } },
+    vertexShader: zVert, fragmentShader: zFrag,
+    transparent: true, premultipliedAlpha: true, depthTest: false, depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
+  }));
+  zQuad.frustumCulled = false; zQuad.renderOrder = 10; zQuad.visible = false;
+  scene.add(zQuad);
+  const clear0 = new THREE.Color(0, 0, 0);
 
   // ---- page textures: uploaded once per page, mipmapped so screentones don't shimmer when scaled down
   const texCache = new Map();
@@ -122,8 +162,34 @@ export function createStage(canvas) {
   }
 
   const bg = new THREE.Color();
-  // frame: { paper: {bg, fg}, pages: [{img, x, y, w, h}], backdrop: {mode, color, rect} | null }
+  // frame: { paper: {bg, fg}, pages: [{img, x, y, w, h}], backdrop: {mode, color, rect} | null,
+  //          ziti: { rect, draw(w, h), redraw: bool } | null }
+  // returns true if the ziti was redrawn this frame
   function render(frame) {
+    const z = frame.ziti;
+    let drew = false;
+    zQuad.visible = !!z;
+    if (z) {
+      const r = z.rect;
+      const rh = Math.max(64, Math.min(Math.round(zMax * zScale), Math.round(r.h)));
+      const rw = Math.max(48, Math.round(rh * r.w / r.h));
+      const rt = zitiTarget(rw, rh);
+      const key = `${rw}x${rh}`;
+      if (z.redraw !== false || key !== zLast) {
+        zLast = key;
+        rt.viewport.set(0, 0, rw, rh);
+        rt.scissor.set(0, 0, rw, rh);
+        rt.scissorTest = true;   // clear only the part in use
+        renderer.setRenderTarget(rt);
+        renderer.setClearColor(clear0, 0);
+        renderer.clear(true, true, false);
+        z.draw(rw, rh);
+        drew = true;
+      }
+      zQuad.material.uniforms.uUv.value.set(rw / rt.width, rh / rt.height);
+      zQuad.position.set(r.x + r.w / 2, r.y + r.h / 2, 0);
+      zQuad.scale.set(r.w, -r.h, 1);
+    }
     renderer.setRenderTarget(null);
     renderer.setViewport(0, 0, W, H);
     renderer.setClearColor(bg.set(frame.paper.bg), 1);
@@ -161,10 +227,15 @@ export function createStage(canvas) {
       u.uBlur.value = blur; u.uDrop.value = drop;
     }
     renderer.render(scene, cam);
+    return drew;
   }
 
   return {
     renderer, setSize, render, prewarm, prune,
+    // the sharpest the ziti is drawn; bigger boxes are scaled up from this
+    setZitiMax(h) { zMax = Math.round(h / 4) * 4; },
+    // the smoothness ladder trades a little ziti sharpness for frame rate on a busy device
+    setZitiScale(s) { zScale = s; },
     get size() { return [W, H]; },
   };
 }

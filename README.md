@@ -10,7 +10,7 @@ Open a chapter, put the noodle where you want it, hit record, and talk. The vide
 
 ### [Open ZitiCam Nippon](https://bkd-ziti.github.io/Ziticam-Nippon/)
 
-![version 0.4.0](https://img.shields.io/badge/version-0.4.0-e8b45a?style=flat-square)
+![version 0.5.0](https://img.shields.io/badge/version-0.5.0-e8b45a?style=flat-square)
 ![runs on phone and PC](https://img.shields.io/badge/runs_on-phone_and_PC-c8432b?style=flat-square)
 ![works offline](https://img.shields.io/badge/works-offline-7fbf6a?style=flat-square)
 ![nothing uploaded](https://img.shields.io/badge/nothing-uploaded-b49f84?style=flat-square)
@@ -79,7 +79,7 @@ Each shape remembers its own ziti spot and size, so switching back and forth doe
 | --- | --- | --- | --- |
 | **720p** | 30 / 60 | older phones, long takes | 39 / 57 MB a minute |
 | **1080p** | 30 / 60 | everyday posting; the safe default | 61 / 91 MB a minute |
-| **4K** | 30 / 60 | YouTube on a strong PC or a recent iPhone | 151 / 226 MB a minute |
+| **4K** | 30 / 60 | YouTube, on a recent iPhone or a PC | 151 / 226 MB a minute |
 
 **60 fps** makes page turns, zooms and the ziti's movement noticeably smoother. **4K** gives YouTube more to work with and keeps text crisp after compression, but a page can only be as sharp as its scan: a 1,500-pixel scan won't gain detail at 4K. PDFs are rendered at higher resolution automatically when 4K is on.
 
@@ -141,23 +141,30 @@ Tall pages (webtoons, or **Fit → Width**) scroll down before they turn.
 - **Zoom with intent.** Pinch into the panel you're talking about. Viewers follow your attention.
 - **Hide the controls** (tap the middle, or `H`) when you want a clean screen to read from. They never show in the video either way.
 
-## keeping it at a steady 30 fps
+## keeping it smooth, up to 4K at 60 fps
 
-Nippon does the heavy lifting in the background: the face tracker runs on its own thread, so the page only has to draw and record each frame. A recent phone should hold 30 fps at 1080p. If yours still dips:
+Nippon is built so a recent phone can record 4K at 60 fps:
 
-- **Record at 1080p / 30 fps on a phone.** 4K and 60 fps draw 2 to 4 times as many pixels a second; they're best on a PC.
+- **The face tracker runs in the background,** so the page only has to draw and record each frame.
+- **Only the ziti is anti-aliased.** The page is a flat rectangle and doesn't need it, so a 4K frame costs a fraction of what it would.
+- **It stays smooth on its own.** If the phone can't keep up, Nippon first redraws the noodle every other frame (the face is only measured 30 times a second anyway, and pages, zooms, page turns and the ziti's box all still move at the full 60), then draws it a little softer, so the video keeps its frame rate instead of stuttering. Every step is checked: if it doesn't actually help, it's undone and the ziti stays at full quality. It steps back up when there's room.
+- **Takes save straight to the phone's storage** as you record, so a long 4K take never has to fit in memory.
+
+If it still dips:
+
+- **Step down one notch:** 4K at 30 fps, or 1080p at 60, looks close to 4K 60 on most screens and is half the work.
 - **Turn off Low Power Mode** (iPhone: Settings → Battery). It slows the screen and the graphics chip.
 - **Keep the phone cool and plugged in** for long takes. A hot phone slows itself down.
 - **Close other apps and tabs,** especially anything else using the camera.
-- **Check where the time goes:** open the app with `?debug=1`. *frame work* is what each frame costs the page; it should sit well under the *budget* (33 ms at 30 fps). *tracked* is how often the face is read; if that's low while *render* holds 30, the video stays smooth and only the face updates less often.
+- **Check where the time goes:** open the app with `?debug=1`. *frame work* is what each frame costs the page; it should sit well under the *budget* (33 ms at 30 fps, 16 ms at 60). *smoothness step* shows whether Nippon is easing off the ziti. *tracked* is how often the face is read; if that's low while *render* holds 30, the video stays smooth and only the face updates less often.
 
 ## good to know
 
 - **Leaving the app mid-take:** on iPhone, switching apps finishes the take so it isn't lost. On a PC, switching tabs pauses it; come back and resume.
 - **The mic meter:** while you record, a small green bar next to the timer moves with your voice. If it moves, your voice is in the take. If no sound reaches the mic for a few seconds, Nippon tells you.
 - **Best audio on iPhone:** in Safari, tap **aA → Website Settings** and set **Microphone** to **Allow**. Nippon can then close the mic between takes, so playback sounds the way it was recorded instead of thin and "on a call".
-- **Long takes:** the timer shows the file size as you go. Takes live in memory until you save them, so on a phone, save every 20 to 30 minutes of recording at 1080p, or every 5 to 10 minutes at 4K. Paused time takes no space.
-- **The last take** stays available (top right) until you delete it or record a new one.
+- **Long takes:** takes save straight to this device's storage as you record, so length isn't limited by memory, only by free space. The timer shows the file size as you go, and Layout shows the MB per minute. Paused time takes no space. (A browser that can't write to storage holds takes in memory instead; Layout says so.)
+- **The last take** stays available (top right) until you delete it or record a new one, even if you close the app. If the app is closed or crashes mid-take on iPhone, everything up to that second is kept and shows up as the last take next time.
 - **Offline:** after one visit with a connection, the whole app, the ziti and the face tracker open with no signal. Manga you open from files works offline too; links need a connection.
 - **Privacy:** your camera feed, your face, your manga and your takes never leave your device. There's no account, no server and no tracking.
 
@@ -185,6 +192,7 @@ Nippon does the heavy lifting in the background: the face tracker runs on its ow
 | `?autostart=1` | skip the start screen |
 | `?notrack=1` | run without the face tracker |
 | `?track=page` | run the face tracker on the page instead of in the background |
+| `?memrec=1` | hold takes in memory instead of writing them to storage |
 | `?mime=video/mp4` | force a recorder format |
 | `?mp=<url>` | load MediaPipe from another location |
 
@@ -194,7 +202,7 @@ Nippon does the heavy lifting in the background: the face tracker runs on its ow
 
 - **Face tracking:** Google MediaPipe Face Landmarker 0.10.35, bundled with the site so it works offline, with the CDN as a fallback. 478 face points plus a jaw-open score. It runs in a background worker, so a slow face check never delays a video frame; each answer comes back with the exact camera frame it measured, so the eyes and mouth stay lined up. Browsers that can't run it in the background run it on the page, as before.
 - **The noodle:** three.js r169 rendering `ziti.glb` onto a transparent canvas, tuned identically to ZitiCam Pocket.
-- **The stage:** pages, backdrop and ziti are drawn together in one GPU pass, 30 or 60 times a second, at 720p, 1080p or 4K. Nothing is copied between canvases, so moving or resizing the ziti mid-take costs next to nothing. Each page is uploaded to the GPU once, before its page turn starts, so turns don't hitch either. The recorder captures that canvas plus your mic: H.264 MP4 where the browser supports it (Safari, Chrome), asking for the H.264 level each size needs (4.0 up to 5.2 for 4K60), and WebM where MP4 isn't available.
+- **The stage:** pages, backdrop and ziti are drawn together on the GPU, 30 or 60 times a second, at 720p, 1080p or 4K. The ziti renders into its own 4x anti-aliased image sized to its box, which is kept between frames, so moving the ziti never redraws it; the full frame isn't anti-aliased, which is most of the saving at 4K. The noodle applies three.js's Neutral tone curve itself, so it looks exactly as before. Each page is uploaded to the GPU once, before its page turn starts, so turns don't hitch either. The recorder captures that canvas plus your mic: H.264 MP4 where the browser supports it (Safari, Chrome), asking for the H.264 level each size needs (4.0 up to 5.2 for 4K60), and WebM where MP4 isn't available.
 - **Audio:** the recorder records one steady audio line, and the mic plugs into it. If the device interrupts the mic mid-take, the take gets a moment of silence instead of a broken audio track, and the mic is reconnected. The camera is never restarted during a take, since that can cut the mic on iPhone.
 - **Manga:** JSZip for CBZ / ZIP and pdf.js for PDF, both bundled. Pages decode a few at a time, so a 200-page volume doesn't run a phone out of memory.
 - **No build step:** plain HTML, CSS and JavaScript. GitHub Pages serves it exactly as it sits in this repo.
@@ -207,6 +215,7 @@ Nippon does the heavy lifting in the background: the face tracker runs on its ow
 | `app.js` | the stage, page turning, gestures, recording |
 | `stage.js` | draws the page, backdrop and ziti together on the GPU |
 | `tracker-worker.js` | the face tracker, running in the background |
+| `take-writer.js` | saves takes to this device's storage as they record |
 | `ziti.js` | the live-face ziti (shared design with Pocket) |
 | `reader.js` | opening files, folders, archives, PDFs and links |
 | `sw.js` | offline support |
@@ -224,6 +233,7 @@ Run it locally with any static server, e.g. `python3 -m http.server`, then open 
 - [x] **v0.2:** 4K output and 60 fps
 - [x] **v0.3:** smooth ziti moves mid-take, reliable audio, live mic meter
 - [x] **v0.4:** face tracking in the background, for a steady 30 fps while recording
+- [x] **v0.5:** 4K 60 on phones: ziti-only anti-aliasing, a self-adjusting smoothness ladder, takes saved straight to storage and kept after a crash
 - [ ] chapter markers: tap as you record, get timestamps for the video description
 - [ ] intro and outro cards with the series title, in BKDziti styling
 - [ ] spotlight: dim everything but the panel you're talking about

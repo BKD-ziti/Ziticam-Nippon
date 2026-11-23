@@ -9,6 +9,32 @@ export const ZITI_ASPECT = 3 / 4;   // width / height of the ziti box
 const MP_VER = '0.10.35';
 const q = new URLSearchParams(location.search);
 
+// The ziti renders into its own anti-aliased image, where three.js skips tone mapping, so the noodle
+// applies three's Neutral curve itself (verbatim, exposure 1). The eyes and mouth never had it, and still don't.
+const NEUTRAL = /* glsl */`
+vec3 zitiNeutral( vec3 color ) {
+  const float StartCompression = 0.8 - 0.04;
+  const float Desaturation = 0.15;
+  float x = min( color.r, min( color.g, color.b ) );
+  float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+  color -= offset;
+  float peak = max( color.r, max( color.g, color.b ) );
+  if ( peak < StartCompression ) return color;
+  float d = 1. - StartCompression;
+  float newPeak = 1. - d * d / ( peak + d - StartCompression );
+  color *= newPeak / peak;
+  float g = 1. - 1. / ( Desaturation * ( peak - newPeak ) + 1. );
+  return mix( color, vec3( newPeak ), g );
+}
+`;
+function bakeToneMapping(m) {
+  m.onBeforeCompile = (sh) => {
+    sh.fragmentShader = NEUTRAL + sh.fragmentShader.replace('#include <tonemapping_fragment>', 'gl_FragColor.rgb = zitiNeutral( gl_FragColor.rgb );');
+  };
+  m.customProgramCacheKey = () => 'ziti-neutral';
+  m.needsUpdate = true;
+}
+
 const SURFACE_R = 0.524;
 const FACE_SPAN = 0.92;
 const FACE_REF = new THREE.Vector2(0.0, 0.20);
@@ -142,6 +168,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
       if (o.name.startsWith('Sauce')) { m.roughness = 0.22; if ('clearcoat' in m) { m.clearcoat = 0.6; m.clearcoatRoughness = 0.08; } }
       else m.roughness = 0.55;
       m.envMapIntensity = 0.9;
+      bakeToneMapping(m);
     });
     sauceNode = root.getObjectByName('Sauce');
     bob.add(root);
@@ -404,10 +431,10 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
     applyInsets(now);
   }
 
-  // draw into the stage's current frame; x, yTop, w, h in stage pixels (y measured from the top)
-  function renderInto(x, yTop, w, h, stageH) {
-    renderer.clearDepth();
-    renderer.setViewport(x, stageH - yTop - h, w, h);
+  // draw into the render target the stage has bound (w x h pixels of it)
+  function renderTo(w, h) {
+    const aspect = w / h;
+    if (Math.abs(camera.aspect - aspect) > 1e-4) { camera.aspect = aspect; camera.updateProjectionMatrix(); }
     renderer.render(scene, camera);
   }
 
@@ -420,7 +447,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
 
   applyLook();
   return {
-    status, update, renderInto, applyLook, straighten, startTracker,
+    status, update, renderTo, applyLook, straighten, startTracker,
     resetFilters: () => filters.clear(),
     get landmarker() { return landmarker || (workerReady ? worker : null); },
     _internals: { onFace, insets, renderer, scene, camera, rig },
