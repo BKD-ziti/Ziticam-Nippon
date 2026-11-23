@@ -7,7 +7,7 @@ import { createZiti, ZITI_ASPECT } from './ziti.js';
 import { createStage } from './stage.js';
 import { bookFromFiles, bookFromUrl, filesFromInput, filesFromDrop, renderTarget } from './reader.js';
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const q = new URLSearchParams(location.search);
 const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -593,15 +593,21 @@ function frame(now) {
   if (now - lastFrame < 1000 / CFG.fps - 3) return;
   const dt = Math.min((now - lastFrame) / 1000, 0.1);
   lastFrame = now;
+  const w0 = performance.now();
   ziti.update(now, dt, CFG.zitiOn);
   draw(now, dt);
   updatePipBox();
+  // main-thread cost of this frame: what has to fit inside 33 ms (or 16 ms at 60 fps)
+  const work = performance.now() - w0;
+  status.work = status.work ? status.work * 0.9 + work * 0.1 : work;
+  status.workMax = Math.max(status.workMax || 0, work);
   fpsN++;
   if (now - fpsT > 1000) {
     status.fps = fpsN * 1000 / (now - fpsT); status.camFps = ziti.status.camFrames * 1000 / (now - fpsT);
     ziti.status.camFrames = 0; fpsN = 0; fpsT = now;
     checkPace();
     drawDebug();
+    status.workMax = 0;
   }
 }
 // dropped frames show up as stutter in the video, so say so once instead of letting it happen quietly
@@ -620,8 +626,9 @@ function drawDebug() {
   const zs = ziti.status;
   $('debug').textContent =
     `ZitiCam Nippon ${VERSION}\n` +
-    `render ${status.fps.toFixed(1)} / ${CFG.fps} fps · camera ${status.camFps.toFixed(1)} fps\n` +
-    `detect ${zs.det.toFixed(1)} ms · tracker ${zs.tracker}${zs.trackerSrc ? ' (' + zs.trackerSrc + ')' : ''}\n` +
+    `render ${status.fps.toFixed(1)} / ${CFG.fps} fps · tracked ${status.camFps.toFixed(1)} fps\n` +
+    `frame work ${(status.work || 0).toFixed(1)} ms avg, ${(status.workMax || 0).toFixed(1)} max · budget ${(1000 / CFG.fps).toFixed(0)} ms\n` +
+    `detect ${zs.det.toFixed(1)} ms · tracker ${zs.tracker}${zs.trackerSrc ? ' (' + zs.trackerSrc + ')' : ''}${zs.workerErr ? ' · worker: ' + zs.workerErr.slice(0, 50) : ''}\n` +
     `camera ${status.cam} · mic ${status.mic}\n` +
     (status.micInfo ? `mic ${CFG.micMode}: ${status.micInfo}\n` : '') +
     `output ${W}x${H} · ziti ${Math.round(pipRect().w)}x${Math.round(pipRect().h)}\n` +

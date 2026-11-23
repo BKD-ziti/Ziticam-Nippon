@@ -7,6 +7,7 @@ import { RoomEnvironment } from './RoomEnvironment.js';
 
 export const ZITI_ASPECT = 3 / 4;   // width / height of the ziti box
 const MP_VER = '0.10.35';
+const q = new URLSearchParams(location.search);
 
 const SURFACE_R = 0.524;
 const FACE_SPAN = 0.92;
@@ -171,8 +172,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
   const mB = new THREE.Matrix4();
   const vx = new THREE.Vector3(), vy = new THREE.Vector3(), vz = new THREE.Vector3();
 
-  function onFace(lm, blend, t) {
-    const W = videoEl.videoWidth, H = videoEl.videoHeight;
+  function onFace(lm, blend, t, W = videoEl.videoWidth, H = videoEl.videoHeight) {
     const mx = CFG.mirror ? (x) => 1 - x : (x) => x;
     const P2 = (i) => new THREE.Vector2(mx(lm[i].x) * W, lm[i].y * H);
     const P3 = (i) => new THREE.Vector3(mx(lm[i].x) * W, -lm[i].y * H, -lm[i].z * W);
@@ -255,12 +255,12 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
   }
 
   function applyInsets(t) {
-    const visible = t - target.seen < 350;
+    const visible = t - target.seen < Math.max(350, 3 * resultGap);
     for (const m of Object.values(insets)) {
       const u = m.material.uniforms;
       u.uOpacity.value += ((visible && m.userData.v ? 1 : 0) - u.uOpacity.value) * 0.25;
       u.uMirror.value = CFG.mirror ? 1 : 0;
-      u.uVideo.value.set(videoEl.videoWidth || 720, videoEl.videoHeight || 1280);
+      u.uVideo.value.set(snap.width || videoEl.videoWidth || 720, snap.height || videoEl.videoHeight || 1280);
       const v = m.userData.v;
       if (!v) continue;
       u.uCropC.value.set(v.crop[0], v.crop[1]);
@@ -271,14 +271,71 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
     }
   }
 
-  // ---- tracker: local copy first (works offline), then CDNs
-  let landmarker = null;
+  // ---- tracker: local copy first (works offline), then CDNs.
+  // It runs in a background worker so a slow face check never delays a video frame;
+  // if this browser can't do that, it runs on the page like before.
+  let landmarker = null, worker = null, workerReady = false, inFlight = false;
+  let resultGap = 33, lastArrival = 0;   // how often face answers arrive; the 'face is here' window stretches to match
+  const trackerBases = () => (mpBase ? [mpBase] : [
+    new URL('./vendor/mediapipe', location.href).href,
+    `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}`,
+    `https://unpkg.com/@mediapipe/tasks-vision@${MP_VER}`,
+  ]);
+  const hostOf = (base) => (new URL(base).host === location.host ? 'local' : new URL(base).host);
+
+  function startWorker() {
+    return new Promise((resolve, reject) => {
+      let w;
+      try { w = new Worker(new URL('./tracker-worker.js', import.meta.url)); }
+      catch (e) { reject(e); return; }
+      const fail = (why) => { try { w.terminate(); } catch {} reject(new Error(why)); };
+      const timer = setTimeout(() => fail('worker took too long to start'), 30000);
+      w.onerror = (e) => { clearTimeout(timer); fail(e.message || 'worker error'); };
+      w.onmessage = (e) => {
+        const m = e.data;
+        if (m.type === 'ready') {
+          clearTimeout(timer);
+          worker = w; workerReady = true;
+          w.onmessage = (ev) => onWorkerResult(ev.data);
+          w.onerror = () => { workerReady = false; status.err = 'tracker worker stopped'; };
+          status.tracker = m.tracker + ' · background';
+          status.trackerSrc = hostOf(m.src);
+          resolve();
+        } else if (m.type === 'failed') { clearTimeout(timer); fail(m.err); }
+      };
+      w.postMessage({ type: 'init', bases: trackerBases(), model: new URL('./face_landmarker.task', location.href).href });
+    });
+  }
+  function onWorkerResult(m) {
+    if (m.type !== 'result') return;
+    inFlight = false;
+    status.camFrames++;
+    status.det = m.det;
+    if (m.err && m.err !== 'not ready') status.err = 'detect: ' + m.err;
+    // the frame the tracker measured becomes the eyes-and-mouth texture, so they line up exactly
+    const bm = m.bitmap;
+    if (bm) {
+      if (snap.width !== bm.width || snap.height !== bm.height) { snap.width = bm.width; snap.height = bm.height; videoTex.dispose(); }
+      snapCtx.drawImage(bm, 0, 0);
+      videoTex.needsUpdate = true;
+      bm.close?.();
+    }
+    status.face = !!m.lm;
+    if (m.lm) {
+      onFace(m.lm, { categories: [{ categoryName: 'jawOpen', score: m.jaw }] }, m.ts, snap.width, snap.height);
+      // smoothing runs on capture time, but "is a face here right now" goes by when the answer arrived
+      const arrived = performance.now();
+      if (lastArrival) resultGap = resultGap * 0.8 + Math.min(1000, arrived - lastArrival) * 0.2;
+      lastArrival = target.seen = lastRawT = arrived;
+    }
+  }
+
   async function startTracker() {
-    const bases = mpBase ? [mpBase] : [
-      new URL('./vendor/mediapipe', location.href).href,
-      `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}`,
-      `https://unpkg.com/@mediapipe/tasks-vision@${MP_VER}`,
-    ];
+    if (q.get('track') !== 'page' && typeof Worker !== 'undefined' && typeof createImageBitmap === 'function') {
+      try { await startWorker(); onChange(); return; }
+      catch (e) { status.workerErr = String(e.message || e); }
+    }
+    const bases = trackerBases();
     let lastErr;
     for (const base of bases) {
       try {
@@ -292,7 +349,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
         });
         try { landmarker = await FaceLandmarker.createFromOptions(fileset, opts('GPU')); status.tracker = 'GPU'; }
         catch (e) { landmarker = await FaceLandmarker.createFromOptions(fileset, opts('CPU')); status.tracker = 'CPU (' + String(e.message || e).slice(0, 40) + ')'; }
-        status.trackerSrc = new URL(base).host === location.host ? 'local' : new URL(base).host;
+        status.trackerSrc = hostOf(base);
         onChange();
         return;
       } catch (e) { lastErr = e; }
@@ -306,7 +363,16 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
   const curQuat = new THREE.Quaternion();
   const IDENT = new THREE.Quaternion();
   function update(now, dt, animate = true) {
-    if (landmarker && videoEl.readyState >= 2 && videoEl.currentTime !== lastVideoTime) {
+    if (workerReady) {
+      // one frame at a time: if the tracker is slower than the camera it just skips frames, the video never waits
+      if (!inFlight && videoEl.readyState >= 2 && videoEl.currentTime !== lastVideoTime) {
+        lastVideoTime = videoEl.currentTime;
+        inFlight = true;
+        createImageBitmap(videoEl)
+          .then((bitmap) => worker.postMessage({ type: 'frame', bitmap, ts: now }, [bitmap]))
+          .catch(() => { inFlight = false; });
+      }
+    } else if (landmarker && videoEl.readyState >= 2 && videoEl.currentTime !== lastVideoTime) {
       lastVideoTime = videoEl.currentTime;
       status.camFrames++;
       const t0 = performance.now();
@@ -323,7 +389,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
     }
     if (!animate) return;
 
-    const tracking = now - target.seen < 500;
+    const tracking = now - target.seen < Math.max(500, 3 * resultGap);
     const goal = tracking ? target.quat : IDENT;
     const follow = 1 - Math.exp(-dt * (16 - 10 * Math.min(1, Math.max(0, CFG.smooth))));
     curQuat.slerp(goal, tracking ? follow : 1 - Math.exp(-dt * 2));
@@ -356,7 +422,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
   return {
     status, update, renderInto, applyLook, straighten, startTracker,
     resetFilters: () => filters.clear(),
-    get landmarker() { return landmarker; },
+    get landmarker() { return landmarker || (workerReady ? worker : null); },
     _internals: { onFace, insets, renderer, scene, camera, rig },
   };
 }
