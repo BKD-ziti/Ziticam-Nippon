@@ -6,8 +6,9 @@
 import { createZiti, ZITI_ASPECT } from './ziti.js';
 import { createStage } from './stage.js';
 import { bookFromFiles, bookFromUrl, filesFromInput, filesFromDrop, renderTarget } from './reader.js';
+import { wcSupport, WcRecorder } from './recorder-wc.js';
 
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 const q = new URLSearchParams(location.search);
 const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -509,6 +510,7 @@ async function openMic() {
 // If the mic hiccups or gets reconnected mid-take, the video gets a moment of silence instead of a broken audio track.
 const AC = window.AudioContext || window.webkitAudioContext;
 let actx = null, bus = null, meter = null, meterBuf = null, micNode = null;
+let tapNode = null, tapReady = null, audioSink = null;   // audio-thread tap for the WebCodecs recorder (audio-tap.js)
 function audioLine() {
   if (!AC || q.get('rawmic') === '1') return null;
   try {
@@ -519,6 +521,16 @@ function audioLine() {
       meter = actx.createAnalyser(); meter.fftSize = 1024;
       meter.connect(bus);
       meterBuf = new Float32Array(meter.fftSize);
+      // mic -> meter -> tap: hands raw audio blocks to the recorder from the audio thread, so drawing can't cause gaps
+      if (actx.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
+        tapReady = actx.audioWorklet.addModule('./audio-tap.js').then(() => {
+          tapNode = new AudioWorkletNode(actx, 'ziti-tap', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+          meter.connect(tapNode);
+          tapNode.connect(bus);   // its output is silent; this just keeps it running
+          tapNode.port.onmessage = (e) => audioSink?.(e.data);
+          return true;
+        }).catch(() => false);
+      }
     }
     if (actx.state !== 'running') actx.resume().catch(() => {});
     return actx;
@@ -600,6 +612,7 @@ function frame(now) {
   const w0 = performance.now();
   ziti.update(now, dt, CFG.zitiOn);
   draw(now, dt);
+  recordFrame();
   updatePipBox();
   // main-thread cost of this frame: what has to fit inside 33 ms (or 16 ms at 60 fps)
   const work = performance.now() - w0;
@@ -667,7 +680,8 @@ function drawDebug() {
     `output ${W}x${H} · ziti ${Math.round(pipRect().w)}x${Math.round(pipRect().h)}\n` +
     `smoothness step ${smooth.lvl} · ziti redrawn every ${rung().every === 1 ? 'frame' : rung().every + ' frames'} at ${Math.round(rung().scale * 100)}%${smooth.holdUntil > performance.now() ? ' · holding' : ''}\n` +
     (status.level !== undefined ? `mic level ${(status.level * 100).toFixed(1)} · audio ${status.audioPath || '–'}\n` : '') +
-    `recorder ${pickMime()?.mime || 'none'}\n` +
+    `recorder ${status.engine || (pickMime()?.mime || 'none')}${status.engineWhy ? ' (' + status.engineWhy + ')' : ''}\n` +
+    (wcRec || status.lastStats ? `frames ${(wcRec || { stats: status.lastStats }).stats.frames} · repeated ${(wcRec || { stats: status.lastStats }).stats.repeats} · encoder waits ${(wcRec || { stats: status.lastStats }).stats.waits}\n` : '') +
     `face ${zs.face ? 'yes' : 'no'}` + (status.rec ? `\n${status.rec}` : '') + (zs.err ? `\nerror ${zs.err}` : '');
 }
 
@@ -756,25 +770,30 @@ let recStart = 0, paused = false, pausedAt = 0, pausedTotal = 0, timerT = 0, tak
 const fmt = (s) => { s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60; return `${h ? h + ':' + String(m).padStart(2, '0') : m}:${String(s % 60).padStart(2, '0')}`; };
 const elapsed = () => (performance.now() - recStart - pausedTotal - (paused ? performance.now() - pausedAt : 0)) / 1000;
 
-function startRecording() {
-  const pm = pickMime();
-  if (!pm) { toast('This browser can\'t record video.'); return; }
-  const vStream = stage.captureStream(CFG.fps);
-  const tracks = [...vStream.getVideoTracks()];
+// Two recording engines:
+//  'webcodecs': every frame the stage draws goes to the hardware H.264 encoder with an exact timestamp (frame n at
+//    n / fps), so the file is a true constant frame rate. Used whenever the device supports it at this size.
+//  'mediarecorder': the browser's built-in recorder, as a fallback (older Safari has no WebCodecs audio encoder).
+//    It's handed one frame per drawn frame, rather than sampling the canvas on its own timer and missing some.
+let wcRec = null, mrTrack = null, finishFn = null, takeMeta = null, startingRec = false;
+const engineCache = new Map();
+function checkEngine(audioRate) {
+  if (q.get('rec') === 'mr') return Promise.resolve({ ok: false, why: 'forced built-in recorder' });
+  const key = `${W}x${H}@${CFG.fps}:${audioRate}:${videoBitrate()}`;
+  if (!engineCache.has(key)) engineCache.set(key, wcSupport({ W, H, fps: CFG.fps, bitrate: videoBitrate(), audioRate }));
+  return engineCache.get(key);
+}
+
+async function startRecording() {
   status.audioPath = '';
-  if (actx?.state === 'running' && plugMic()) { tracks.push(bus.stream.getAudioTracks()[0]); status.audioPath = 'line'; }
-  else if (micLive()) { tracks.push(micStream.getAudioTracks()[0]); status.audioPath = 'direct'; }
-  const micNote = tracks.length > 1 ? (CFG.micMode === 'voice' ? 'voice mic' : 'clean mic') : 'no sound';
-  const stream = new MediaStream(tracks);
-  try { recorder = new MediaRecorder(stream, { mimeType: pm.mime, videoBitsPerSecond: videoBitrate(), audioBitsPerSecond: 160_000 }); }
-  catch { recorder = new MediaRecorder(stream); }
-  chunks = []; bytes = 0;
+  let audioTrack = null;
+  if (actx?.state === 'running' && plugMic()) { audioTrack = bus.stream.getAudioTracks()[0]; status.audioPath = 'line'; }
+  else if (micLive()) { audioTrack = micStream.getAudioTracks()[0]; status.audioPath = 'direct'; }
+  const micNote = audioTrack ? (CFG.micMode === 'voice' ? 'voice mic' : 'clean mic') : 'no sound';
   const shape = `${W}×${H} · ${CFG.fps} fps`;
-  const startedAt = performance.now();
-  const type = (recorder.mimeType || pm.mime).split(';')[0] || 'video/mp4';
-  const ext = type.includes('mp4') ? 'mp4' : 'webm';
-  const takeName = ['ziticam-nippon', slug(book?.title), stamp()].filter(Boolean).join('-') + '.' + ext;
   const toDisk = disk.ok;
+  const nameFor = (ext) => ['ziticam-nippon', slug(book?.title), stamp()].filter(Boolean).join('-') + '.' + ext;
+  chunks = []; bytes = 0; wcRec = null; mrTrack = null; finishFn = null;
   let diskFailed = false;
   const diskFail = () => {
     if (diskFailed) return;
@@ -782,81 +801,172 @@ function startRecording() {
     toast('Couldn\'t write to this device\'s storage (it may be full). Stopping here so the take so far is kept.', 6500);
     stopRecording();
   };
-  if (toDisk) diskCall({ type: 'open', name: takeName }).catch(diskFail);
-  recorder.ondataavailable = (e) => {
-    if (!e.data || !e.data.size) return;
-    bytes += e.data.size;
-    if (toDisk) { if (!diskFailed) diskCall({ type: 'chunk', blob: e.data }).catch(diskFail); }
-    else chunks.push(e.data);
+  const readDisk = async (name, type) => {
+    try { await diskCall({ type: 'close' }); return new Blob([await diskFile(name)], { type }); } catch { return null; }
   };
-  recorder.onstop = async () => {
-    for (const t of vStream.getVideoTracks()) t.stop();
-    const secs = elapsed();
-    // hand the audio back before playback: a live mic keeps iPhones in call mode, which mangles what you hear
-    unplugMic(); sleepAudio(); releaseMic();
-    status.level = undefined;
-    if (camRestartPending) { camRestartPending = false; restartCamera(); }
-    let blob = null;
-    if (toDisk) {
-      try { await diskCall({ type: 'close' }); blob = new Blob([await diskFile(takeName)], { type }); }
-      catch { blob = null; }
-    } else { blob = new Blob(chunks, { type }); chunks = []; }
-    if (!blob || blob.size < 2000) {
-      if (toDisk) diskCall({ type: 'remove', names: [takeName] }).catch(() => {});
-      toast('That take came out empty. Try again, and give it a second before stopping.', 4500);
-      return;
+
+  // WebCodecs needs the audio-thread tap for sound; without it (no Web Audio), use the built-in recorder
+  const tapOk = status.audioPath === 'line' && tapReady
+    ? await Promise.race([tapReady, new Promise((r) => setTimeout(() => r(false), 1500))]) : false;
+  const audioRate = audioTrack ? (tapOk ? actx.sampleRate : -1) : 0;
+  const engine = audioRate < 0 ? { ok: false, why: 'no audio tap' } : await checkEngine(audioRate);
+  status.engineWhy = engine.ok ? '' : engine.why;
+  if (engine.ok) {
+    const takeName = nameFor('mp4');
+    if (toDisk) diskCall({ type: 'open', name: takeName }).catch(diskFail);
+    const rec = new WcRecorder({
+      canvas: stage, fps: CFG.fps, bitrate: videoBitrate(), audioRate,
+      write: toDisk ? (data, position) => (diskFailed ? Promise.resolve() : diskCall({ type: 'write', data, position }).catch(diskFail)) : null,
+      onBytes: (n) => { bytes += n; },
+      onError: (e) => {
+        ziti.status.err = 'encoder: ' + (e.message || e);
+        toast('The video encoder stopped. Keeping what was recorded so far.', 5000);
+        stopRecording();
+      },
+    });
+    try { await rec.start(); }
+    catch (e) {
+      status.engineWhy = 'WebCodecs start failed: ' + String(e.message || e).slice(0, 60);
+      rec.cancel();
+      if (toDisk) await diskCall({ type: 'remove', names: [takeName] }).catch(() => {});
+      return startBuiltIn();
     }
-    finishTake(blob, secs, ext, micNote, shape, toDisk ? takeName : '');
-  };
-  recorder.onerror = (e) => {
-    ziti.status.err = 'recorder: ' + (e.error?.message || e.name || 'error');
-    // an encoder that can't handle the size usually fails right away
-    if (performance.now() - startedAt < 5000 && (CFG.quality === 2160 || CFG.fps === 60)) {
-      toast('This device couldn\'t record at that size. Try 1080p or 30 fps in Layout.', 6000);
+    wcRec = rec;
+    status.engine = 'WebCodecs · ' + rec.mime;
+    if (audioRate) {
+      audioSink = (block) => { if (!paused) rec.pushAudio(block); };   // paused audio is left out, like paused video
+      tapNode.port.postMessage({ on: true });
     }
-  };
-  recorder.start(1000);
-  recording = true; paused = false; pausedTotal = 0; recStart = performance.now();
-  document.body.classList.add('recording');
-  $('rec').setAttribute('aria-label', 'Stop recording');
-  let quietFor = 0, quietWarned = tracks.length < 2;
-  const tick = () => {
-    const mb = bytes / 1e6;
-    $('timerText').textContent = `${fmt(elapsed())} · ${mb < 1000 ? mb.toFixed(0) + ' MB' : (mb / 1000).toFixed(2) + ' GB'}`;
-    status.rec = (paused ? 'paused ' : 'recording ') + $('timerText').textContent;
-    // the meter shows that sound is really reaching the take
-    const lv = micLevel();
-    status.level = lv;
-    $('meterFill').style.transform = `scaleX(${Math.min(1, Math.sqrt(lv) * 2.2).toFixed(3)})`;
-    if (status.audioPath === 'line' && !paused) {
-      quietFor = lv < 0.0015 ? quietFor + 0.25 : 0;
-      if (quietFor >= 8 && !quietWarned) {
-        quietWarned = true;
-        toast('No sound is reaching the mic. Check nothing is covering it and no other app is using it.', 6000);
+    finishFn = async () => {
+      let r = {};
+      if (audioRate) {
+        tapNode.port.postMessage({ on: false });
+        await new Promise((res) => setTimeout(res, 200));   // let the last block arrive
+        audioSink = null;
       }
-    }
-  };
-  tick(); timerT = setInterval(tick, 250);
-  $('meter').hidden = status.audioPath !== 'line';
-  keepAwake();
+      try { r = await rec.stop(); } catch { /* the encoder failed; whatever reached storage is still kept */ }
+      return { blob: toDisk ? await readDisk(takeName, 'video/mp4') : (r.blob || null), ext: 'mp4', diskName: toDisk ? takeName : '', steady: true };
+    };
+    return beginTake();
+  }
+  return startBuiltIn();
+
+  function startBuiltIn() {
+    const pm = pickMime();
+    if (!pm) { toast('This browser can\'t record video.'); unplugMic(); sleepAudio(); releaseMic(); return; }
+    let vStream = stage.captureStream(0);
+    mrTrack = vStream.getVideoTracks()[0];
+    if (typeof mrTrack?.requestFrame !== 'function') { mrTrack?.stop(); vStream = stage.captureStream(CFG.fps); mrTrack = null; }
+    const stream = new MediaStream([...vStream.getVideoTracks(), ...(audioTrack ? [audioTrack] : [])]);
+    try { recorder = new MediaRecorder(stream, { mimeType: pm.mime, videoBitsPerSecond: videoBitrate(), audioBitsPerSecond: 160_000 }); }
+    catch { recorder = new MediaRecorder(stream); }
+    const type = (recorder.mimeType || pm.mime).split(';')[0] || 'video/mp4';
+    const ext = type.includes('mp4') ? 'mp4' : 'webm';
+    const takeName = nameFor(ext);
+    const startedAt = performance.now();
+    status.engine = 'built-in recorder · ' + type + (mrTrack ? ' · frame-locked' : '');
+    if (toDisk) diskCall({ type: 'open', name: takeName }).catch(diskFail);
+    recorder.ondataavailable = (e) => {
+      if (!e.data || !e.data.size) return;
+      bytes += e.data.size;
+      if (toDisk) { if (!diskFailed) diskCall({ type: 'chunk', blob: e.data }).catch(diskFail); }
+      else chunks.push(e.data);
+    };
+    let stopped;
+    const stoppedP = new Promise((r) => { stopped = r; });
+    recorder.onstop = () => { for (const t of vStream.getVideoTracks()) t.stop(); stopped(); };
+    recorder.onerror = (e) => {
+      ziti.status.err = 'recorder: ' + (e.error?.message || e.name || 'error');
+      // an encoder that can't handle the size usually fails right away
+      if (performance.now() - startedAt < 5000 && (CFG.quality === 2160 || CFG.fps === 60)) {
+        toast('This device couldn\'t record at that size. Try 1080p or 30 fps in Layout.', 6000);
+      }
+    };
+    finishFn = async () => {
+      try { if (recorder.state === 'paused') recorder.resume(); } catch {}
+      try { recorder.requestData?.(); } catch {}
+      try { recorder.stop(); } catch { stopped(); }
+      await stoppedP;
+      let blob;
+      if (toDisk) blob = await readDisk(takeName, type);
+      else { blob = new Blob(chunks, { type }); chunks = []; }
+      return { blob, ext, diskName: toDisk ? takeName : '' };
+    };
+    recorder.start(1000);
+    beginTake();
+  }
+
+  function beginTake() {
+    recording = true; paused = false; pausedTotal = 0; recStart = performance.now();
+    document.body.classList.add('recording');
+    $('rec').setAttribute('aria-label', 'Stop recording');
+    let quietFor = 0, quietWarned = !audioTrack;
+    const tick = () => {
+      const mb = bytes / 1e6;
+      $('timerText').textContent = `${fmt(elapsed())} · ${mb < 1000 ? mb.toFixed(0) + ' MB' : (mb / 1000).toFixed(2) + ' GB'}`;
+      status.rec = (paused ? 'paused ' : 'recording ') + $('timerText').textContent;
+      // the meter shows that sound is really reaching the take
+      const lv = micLevel();
+      status.level = lv;
+      $('meterFill').style.transform = `scaleX(${Math.min(1, Math.sqrt(lv) * 2.2).toFixed(3)})`;
+      if (status.audioPath === 'line' && !paused) {
+        quietFor = lv < 0.0015 ? quietFor + 0.25 : 0;
+        if (quietFor >= 8 && !quietWarned) {
+          quietWarned = true;
+          toast('No sound is reaching the mic. Check nothing is covering it and no other app is using it.', 6000);
+        }
+      }
+    };
+    tick(); timerT = setInterval(tick, 250);
+    $('meter').hidden = status.audioPath !== 'line';
+    keepAwake();
+    takeMeta = { micNote, shape };
+  }
 }
+
+// called from the frame loop right after the stage is drawn
+function recordFrame() {
+  if (!recording || paused) return;
+  if (wcRec) wcRec.frame(elapsed());
+  else if (mrTrack) mrTrack.requestFrame();
+}
+
 function stopRecording() {
   if (!recording) return;
   if (paused) { pausedTotal += performance.now() - pausedAt; paused = false; }
+  const secs = elapsed();
   recording = false;
   clearInterval(timerT);
   document.body.classList.remove('recording', 'paused');
   $('rec').setAttribute('aria-label', 'Record');
   status.rec = '';
-  try { if (recorder.state === 'paused') recorder.resume(); } catch {}
-  try { recorder.requestData?.(); } catch {}
-  try { recorder.stop(); } catch {}
+  const fin = finishFn, meta = takeMeta || {};
+  finishFn = null;
+  if (fin) finalizeTake(fin, secs, meta);
+}
+async function finalizeTake(fin, secs, { micNote = '', shape = '' }) {
+  setStatus('Finishing the video…');
+  let res = {};
+  try { res = await fin(); } catch { res = {}; }
+  setStatus('');
+  if (wcRec) status.lastStats = wcRec.stats;
+  wcRec = null; mrTrack = null;
+  // hand the audio back before playback: a live mic keeps iPhones in call mode, which mangles what you hear
+  unplugMic(); sleepAudio(); releaseMic();
+  status.level = undefined;
+  if (camRestartPending) { camRestartPending = false; restartCamera(); }
+  if (!res.blob || res.blob.size < 2000) {
+    if (res.diskName) diskCall({ type: 'remove', names: [res.diskName] }).catch(() => {});
+    toast('That take came out empty. Try again, and give it a second before stopping.', 4500);
+    return;
+  }
+  finishTake(res.blob, secs, res.ext, micNote, res.steady ? shape + ' constant' : shape, res.diskName);
 }
 function togglePause() {
-  if (!recording || !recorder) return;
+  if (!recording) return;
   try {
-    if (!paused) { recorder.pause(); paused = true; pausedAt = performance.now(); }
-    else { recorder.resume(); paused = false; pausedTotal += performance.now() - pausedAt; autoPaused = false; }
+    if (!paused) { if (!wcRec) recorder.pause(); paused = true; pausedAt = performance.now(); }
+    else { if (!wcRec) recorder.resume(); paused = false; pausedTotal += performance.now() - pausedAt; autoPaused = false; }
   } catch { toast('This browser can\'t pause recordings. Stop and start a new take instead.'); return; }
   document.body.classList.toggle('paused', paused);
   $('pauseBtn').setAttribute('aria-label', paused ? 'Resume recording' : 'Pause recording');
@@ -869,6 +979,7 @@ async function countdownThenRecord() {
   counting = true;
   audioLine();   // must start inside the tap, or iPhones keep it switched off
   const micReady = status.mic === 'unavailable' ? Promise.resolve(false) : openMic();
+  if (actx) checkEngine(status.mic !== 'unavailable' ? actx.sampleRate : 0);   // warm up the encoder check during the countdown
   const el = $('count');
   if (CFG.countdown) {
     el.classList.add('show');
@@ -882,7 +993,8 @@ async function countdownThenRecord() {
   if (!counting) { releaseMic(); sleepAudio(); return; }
   counting = false;
   if (!ok) toast('No mic, so this take is silent. Allow the microphone for this site to add sound.', 4500);
-  startRecording();
+  startingRec = true;
+  try { await startRecording(); } finally { startingRec = false; }
 }
 
 function stamp() {
@@ -942,7 +1054,7 @@ async function keepAwake() {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     // iPhone cuts the mic when you leave, so finish the take there; on a PC, just pause it
-    if (recording && (IOS || !recorder?.pause)) stopRecording();
+    if (recording && (IOS || (!wcRec && !recorder?.pause))) stopRecording();
     else if (recording && !paused) { togglePause(); autoPaused = true; }
     else if (!recording) { releaseMic(true); sleepAudio(); }
     counting = false;
@@ -1099,6 +1211,7 @@ function wire() {
   $('rec').addEventListener('click', () => {
     if ($('rec').disabled) return;
     if (counting) { counting = false; return; }
+    if (startingRec) return;
     if (recording) stopRecording();
     else { if (take) unloadReview(); countdownThenRecord(); }
   });
@@ -1167,5 +1280,5 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 window.__zn = {
   CFG, ziti, status, step, goTo, setOpt, openBook, bookFromFiles, startRecording, stopRecording, togglePause, pipRect,
   get W() { return W; }, get H() { return H; }, get book() { return book; }, get pageIdx() { return pageIdx; },
-  get view() { return view; }, get take() { return take; }, get micStream() { return micStream; }, get actx() { return actx; }, disk, get smoothLevel() { return smooth.lvl; }, get recording() { return recording; }, get trans() { return trans; },
+  get view() { return view; }, get take() { return take; }, get micStream() { return micStream; }, get actx() { return actx; }, disk, get smoothLevel() { return smooth.lvl; }, get engine() { return status.engine; }, get wcStats() { return wcRec?.stats || status.lastStats; }, get recording() { return recording; }, get trans() { return trans; },
 };

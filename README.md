@@ -10,7 +10,7 @@ Open a chapter, put the noodle where you want it, hit record, and talk. The vide
 
 ### [Open ZitiCam Nippon](https://bkd-ziti.github.io/Ziticam-Nippon/)
 
-![version 0.5.0](https://img.shields.io/badge/version-0.5.0-e8b45a?style=flat-square)
+![version 0.6.0](https://img.shields.io/badge/version-0.6.0-e8b45a?style=flat-square)
 ![runs on phone and PC](https://img.shields.io/badge/runs_on-phone_and_PC-c8432b?style=flat-square)
 ![works offline](https://img.shields.io/badge/works-offline-7fbf6a?style=flat-square)
 ![nothing uploaded](https://img.shields.io/badge/nothing-uploaded-b49f84?style=flat-square)
@@ -148,6 +148,7 @@ Nippon is built so a recent phone can record 4K at 60 fps:
 - **The face tracker runs in the background,** so the page only has to draw and record each frame.
 - **Only the ziti is anti-aliased.** The page is a flat rectangle and doesn't need it, so a 4K frame costs a fraction of what it would.
 - **It stays smooth on its own.** If the phone can't keep up, Nippon first redraws the noodle every other frame (the face is only measured 30 times a second anyway, and pages, zooms, page turns and the ziti's box all still move at the full 60), then draws it a little softer, so the video keeps its frame rate instead of stuttering. Every step is checked: if it doesn't actually help, it's undone and the ziti stays at full quality. It steps back up when there's room.
+- **The file is a true constant frame rate.** Every frame the stage draws goes straight to the phone's hardware video encoder, stamped at exactly 1/30 (or 1/60) of a second apart. If the phone hiccups and misses a beat, that beat is filled with the current picture instead of being left out, so a 30 fps setting gives a 30 fps file, in sync with your voice.
 - **Takes save straight to the phone's storage** as you record, so a long 4K take never has to fit in memory.
 
 If it still dips:
@@ -156,7 +157,8 @@ If it still dips:
 - **Turn off Low Power Mode** (iPhone: Settings → Battery). It slows the screen and the graphics chip.
 - **Keep the phone cool and plugged in** for long takes. A hot phone slows itself down.
 - **Close other apps and tabs,** especially anything else using the camera.
-- **Check where the time goes:** open the app with `?debug=1`. *frame work* is what each frame costs the page; it should sit well under the *budget* (33 ms at 30 fps, 16 ms at 60). *smoothness step* shows whether Nippon is easing off the ziti. *tracked* is how often the face is read; if that's low while *render* holds 30, the video stays smooth and only the face updates less often.
+- **Check how it's recording:** open the app with `?debug=1`. The *recorder* line says **WebCodecs** when takes are constant frame rate; on older iPhones (before iOS 26) it says *built-in recorder*, which keeps every frame drawn but can't fill hiccups. *frames · repeated* shows how many beats had to be filled.
+- **Check where the time goes:** in the same stats, *frame work* is what each frame costs the page; it should sit well under the *budget* (33 ms at 30 fps, 16 ms at 60). *smoothness step* shows whether Nippon is easing off the ziti. *tracked* is how often the face is read; if that's low while *render* holds 30, the video stays smooth and only the face updates less often.
 
 ## good to know
 
@@ -180,6 +182,7 @@ If it still dips:
 | "The mic was interrupted" | another app or a call grabbed the mic; Nippon reconnects it, and the take keeps going with a short gap |
 | it feels slow, or a warning says frames are dropping | step down in **Layout**: 4K → 1080p, then 60 → 30 fps, then 720p. Close other apps and tabs |
 | "couldn't record at that size" | that browser's video encoder doesn't support the setting; use 1080p or 30 fps |
+| the saved video has fewer frames per second than you set | update to iOS 26 or later; Nippon then records at a constant frame rate. On older versions it records every frame the phone manages to draw |
 | settings don't stick | private / incognito windows don't keep settings; use a normal window |
 
 <details>
@@ -193,6 +196,7 @@ If it still dips:
 | `?notrack=1` | run without the face tracker |
 | `?track=page` | run the face tracker on the page instead of in the background |
 | `?memrec=1` | hold takes in memory instead of writing them to storage |
+| `?rec=mr` | record with the browser's built-in recorder instead of WebCodecs |
 | `?mime=video/mp4` | force a recorder format |
 | `?mp=<url>` | load MediaPipe from another location |
 
@@ -203,6 +207,7 @@ If it still dips:
 - **Face tracking:** Google MediaPipe Face Landmarker 0.10.35, bundled with the site so it works offline, with the CDN as a fallback. 478 face points plus a jaw-open score. It runs in a background worker, so a slow face check never delays a video frame; each answer comes back with the exact camera frame it measured, so the eyes and mouth stay lined up. Browsers that can't run it in the background run it on the page, as before.
 - **The noodle:** three.js r169 rendering `ziti.glb` onto a transparent canvas, tuned identically to ZitiCam Pocket.
 - **The stage:** pages, backdrop and ziti are drawn together on the GPU, 30 or 60 times a second, at 720p, 1080p or 4K. The ziti renders into its own 4x anti-aliased image sized to its box, which is kept between frames, so moving the ziti never redraws it; the full frame isn't anti-aliased, which is most of the saving at 4K. The noodle applies three.js's Neutral tone curve itself, so it looks exactly as before. Each page is uploaded to the GPU once, before its page turn starts, so turns don't hitch either. The recorder captures that canvas plus your mic: H.264 MP4 where the browser supports it (Safari, Chrome), asking for the H.264 level each size needs (4.0 up to 5.2 for 4K60), and WebM where MP4 isn't available.
+- **Recording:** with WebCodecs (iOS 26+, recent Chrome and Edge), each drawn frame is captured from the GPU right after it's drawn and handed to the hardware H.264 encoder with an exact timestamp; [Mediabunny](https://mediabunny.dev) writes the MP4 (fragmented, so it survives a crash). Audio is captured on the audio thread by an AudioWorklet, so busy drawing can never cause gaps, and is timestamped by sample count. Where WebCodecs can't record with sound, the browser's built-in recorder is used, handed exactly one frame per drawn frame.
 - **Audio:** the recorder records one steady audio line, and the mic plugs into it. If the device interrupts the mic mid-take, the take gets a moment of silence instead of a broken audio track, and the mic is reconnected. The camera is never restarted during a take, since that can cut the mic on iPhone.
 - **Manga:** JSZip for CBZ / ZIP and pdf.js for PDF, both bundled. Pages decode a few at a time, so a 200-page volume doesn't run a phone out of memory.
 - **No build step:** plain HTML, CSS and JavaScript. GitHub Pages serves it exactly as it sits in this repo.
@@ -216,6 +221,9 @@ If it still dips:
 | `stage.js` | draws the page, backdrop and ziti together on the GPU |
 | `tracker-worker.js` | the face tracker, running in the background |
 | `take-writer.js` | saves takes to this device's storage as they record |
+| `recorder-wc.js` | constant-frame-rate recording with WebCodecs |
+| `audio-tap.js` | captures the mic on the audio thread for recording |
+| `vendor/mediabunny.min.mjs` | writes the MP4 file |
 | `ziti.js` | the live-face ziti (shared design with Pocket) |
 | `reader.js` | opening files, folders, archives, PDFs and links |
 | `sw.js` | offline support |
@@ -234,6 +242,7 @@ Run it locally with any static server, e.g. `python3 -m http.server`, then open 
 - [x] **v0.3:** smooth ziti moves mid-take, reliable audio, live mic meter
 - [x] **v0.4:** face tracking in the background, for a steady 30 fps while recording
 - [x] **v0.5:** 4K 60 on phones: ziti-only anti-aliasing, a self-adjusting smoothness ladder, takes saved straight to storage and kept after a crash
+- [x] **v0.6:** constant-frame-rate recording: the file gets every frame at exactly 30 or 60 fps, with gapless audio
 - [ ] chapter markers: tap as you record, get timestamps for the video description
 - [ ] intro and outro cards with the series title, in BKDziti styling
 - [ ] spotlight: dim everything but the panel you're talking about
@@ -246,6 +255,7 @@ Run it locally with any static server, e.g. `python3 -m http.server`, then open 
 - [MediaPipe](https://ai.google.dev/edge/mediapipe), Apache 2.0 (`licenses/mediapipe-NOTICE.txt`)
 - [JSZip](https://stuk.github.io/jszip/), MIT (`licenses/jszip-LICENSE.md`)
 - [pdf.js](https://mozilla.github.io/pdf.js/), Apache 2.0 (`licenses/pdf.js-LICENSE.txt`)
+- [Mediabunny](https://mediabunny.dev) 1.65.2, unmodified, MPL 2.0 (`licenses/mediabunny-LICENSE.txt`)
 - The ziti, its sauce and its basil: © BKDziti LLC
 
 Manga you open belongs to its creators and publishers. Nippon is a reader and a recorder; it doesn't host or share anyone's work. Support the series you review.
