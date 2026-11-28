@@ -8,7 +8,7 @@ import { createStage } from './stage.js';
 import { bookFromFiles, bookFromUrl, filesFromInput, filesFromDrop, renderTarget } from './reader.js';
 import { wcSupport, WcRecorder } from './recorder-wc.js';
 
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 const q = new URLSearchParams(location.search);
 const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -21,6 +21,9 @@ const DEFAULTS = {
   sauce: true, brows: false, mirror: false, flip: true,
   eyes: 1.1, mouth: 1.24, mouthLift: 0.16, eyeLift: 0, eyeSpread: 0.94,
   turn: 1.15, sway: 0.45, bounce: 2, smooth: 0.5, zoom: 1, lift: 0,
+  // the plate: the ziti pops up out of a plate of ziti (off = the classic floating noodle);
+  // how much its body copies the head's turn, how springy it is
+  body: true, follow: 0.5, wobble: 0.5,
   // video
   shape: deskFirst ? 'wide' : 'tall', quality: 1080, fps: 30, paper: 'ink',
   // pages
@@ -29,7 +32,7 @@ const DEFAULTS = {
   zitiOn: true, backdrop: 'none', backdropColor: 'gold', pip: PIP_DEFAULTS,
   countdown: true, micMode: 'clean',
 };
-const LOOK_KEYS = ['sauce', 'brows', 'mirror', 'flip', 'eyes', 'mouth', 'mouthLift', 'eyeLift', 'eyeSpread', 'turn', 'sway', 'bounce', 'smooth', 'zoom', 'lift'];
+const LOOK_KEYS = ['sauce', 'brows', 'mirror', 'flip', 'eyes', 'mouth', 'mouthLift', 'eyeLift', 'eyeSpread', 'turn', 'sway', 'bounce', 'smooth', 'zoom', 'lift', 'body', 'follow', 'wobble'];
 const STORE = 'nippon.v1';
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -1136,6 +1139,10 @@ const SLIDERS = [
     ['sway', 'Drift', 0, 1.2, 0.01],
     ['bounce', 'Talk bounce', 0, 3, 0.05],
     ['smooth', 'Calm', 0, 1, 0.01],
+  ]],
+  ['Body', [
+    ['follow', 'Body follow', 0, 1, 0.01],
+    ['wobble', 'Wobble', 0, 1, 0.01],
   ]],
   ['Inside the frame', [
     ['zoom', 'Ziti size', 0.6, 1.6, 0.01],

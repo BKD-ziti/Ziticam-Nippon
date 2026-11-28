@@ -10,7 +10,7 @@ Open a chapter, put the noodle where you want it, hit record, and talk. The vide
 
 ### [Open ZitiCam Nippon](https://bkd-ziti.github.io/Ziticam-Nippon/)
 
-![version 0.6.0](https://img.shields.io/badge/version-0.6.0-e8b45a?style=flat-square)
+![version 0.7.0](https://img.shields.io/badge/version-0.7.0-e8b45a?style=flat-square)
 ![runs on phone and PC](https://img.shields.io/badge/runs_on-phone_and_PC-c8432b?style=flat-square)
 ![works offline](https://img.shields.io/badge/works-offline-7fbf6a?style=flat-square)
 ![nothing uploaded](https://img.shields.io/badge/nothing-uploaded-b49f84?style=flat-square)
@@ -36,6 +36,24 @@ Nippon removes the assembly. You read, you react, you turn pages, and everything
 | **ZitiCam Nippon** | manga reviews, pages and ziti in one take | phone or PC, online or off |
 
 Same noodle, same tracking, same tuning across all three. Your ziti looks like your ziti wherever you film.
+
+## the ziti on its plate
+
+The ziti isn't a floating noodle anymore. It's one noodle popping up out of a plate of ziti: a low bed of pasta tossed in sauce, with basil and parmesan, on a glazed plate with a gold rim. Your real eyes and mouth sit up near the sauce at the top; right under the mouth it softens into a neck; below that the body carries on down into the pasta.
+
+It's rigged like a face-tracked puppet: the head is pinned to your face, and everything below it follows on springs.
+
+| you | the ziti |
+| --- | --- |
+| move your head side to side | the noodle leans from the plate to follow, a beat late, and settles |
+| sit up / slouch | it slides up out of the pasta / sinks back in |
+| lean in | it bends toward the camera |
+| turn or tilt your head | the head turns with you; the body twists and tilts part of the way |
+| talk | the head squashes with your jaw and the whole noodle bobs with your voice |
+
+The head never lags: it's the part people read. The springs are all below the neck, which is where the life comes from. **Look → Body follow** sets how much the body copies the head's turn, **Look → Wobble** how springy it is, and **Plate** switches back to the classic floating noodle.
+
+The plate is built in code when the app opens: no extra download, and it works offline like everything else.
 
 ## how it works
 
@@ -131,7 +149,7 @@ Tall pages (webtoons, or **Fit → Width**) scroll down before they turn.
 
 **Layout** holds the ziti size, corner presets, a backdrop (circle or card, in gold, paper, ink or tomato), reading direction, page fit, where the page sits, the page-turn style (slide or cut), the background behind the page (ink or paper), and the video shape and size.
 
-**Look** is the ziti itself, the same controls as Pocket: Set straight, eye and mouth size and placement, head follow, drift, talk bounce, calm, ziti size inside its frame, sauce, eyebrows, flip, mirror, the 3-2-1 countdown, and Clean / Voice mic. **Reset to stream look** brings back the stream PC's tuning.
+**Look** is the ziti itself, the same controls as Pocket: Set straight, eye and mouth size and placement, head follow, drift, talk bounce, calm, body follow, wobble, ziti size inside its frame, plate, sauce, eyebrows, flip, mirror, the 3-2-1 countdown, and Clean / Voice mic. **Reset to stream look** brings back the stream PC's tuning.
 
 ## tips for a better review
 
@@ -205,7 +223,8 @@ If it still dips:
 ## under the hood
 
 - **Face tracking:** Google MediaPipe Face Landmarker 0.10.35, bundled with the site so it works offline, with the CDN as a fallback. 478 face points plus a jaw-open score. It runs in a background worker, so a slow face check never delays a video frame; each answer comes back with the exact camera frame it measured, so the eyes and mouth stay lined up. Browsers that can't run it in the background run it on the page, as before.
-- **The noodle:** three.js r169 rendering `ziti.glb` onto a transparent canvas, tuned identically to ZitiCam Pocket.
+- **The noodle:** three.js r169 rendering `ziti.glb` onto a transparent canvas, tuned identically to ZitiCam Pocket. On the plate it's a skinned mesh with three bones (body, neck, head), shaped from the same model in code: the head is the modeled noodle untouched, the lower part is stretched into the neck and body, and the sauce drips are shortened so they stay on the head. The head bone is set straight from the face tracker; the body bone is driven by damped springs that aim it at the head from its base in the plate; the neck sits halfway between in position and turn so it bends evenly.
+- **The plate:** built at load in `ziti-plate.js`. Small ziti are dropped onto the plate one at a time and come to rest on whatever's already there (a height map keeps track), so they settle like real pasta; the ones buried under the sauce aren't drawn at all. The sauce is poured over that exact layer, then basil, tomato, herbs and parmesan go on top. Soft shadows from the key light give the pasta its depth.
 - **The stage:** pages, backdrop and ziti are drawn together on the GPU, 30 or 60 times a second, at 720p, 1080p or 4K. The ziti renders into its own 4x anti-aliased image sized to its box, which is kept between frames, so moving the ziti never redraws it; the full frame isn't anti-aliased, which is most of the saving at 4K. The noodle applies three.js's Neutral tone curve itself, so it looks exactly as before. Each page is uploaded to the GPU once, before its page turn starts, so turns don't hitch either. The recorder captures that canvas plus your mic: H.264 MP4 where the browser supports it (Safari, Chrome), asking for the H.264 level each size needs (4.0 up to 5.2 for 4K60), and WebM where MP4 isn't available.
 - **Recording:** with WebCodecs (iOS 26+, recent Chrome and Edge), each drawn frame is captured from the GPU right after it's drawn and handed to the hardware H.264 encoder with an exact timestamp; [Mediabunny](https://mediabunny.dev) writes the MP4 (fragmented, so it survives a crash). Audio is captured on the audio thread by an AudioWorklet, so busy drawing can never cause gaps, and is timestamped by sample count. Where WebCodecs can't record with sound, the browser's built-in recorder is used, handed exactly one frame per drawn frame.
 - **Audio:** the recorder records one steady audio line, and the mic plugs into it. If the device interrupts the mic mid-take, the take gets a moment of silence instead of a broken audio track, and the mic is reconnected. The camera is never restarted during a take, since that can cut the mic on iPhone.
@@ -225,6 +244,8 @@ If it still dips:
 | `audio-tap.js` | captures the mic on the audio thread for recording |
 | `vendor/mediabunny.min.mjs` | writes the MP4 file |
 | `ziti.js` | the live-face ziti (shared design with Pocket) |
+| `ziti-rig.js` | the head, neck and body, and how they move (identical in Pocket) |
+| `ziti-plate.js` | the plate of ziti the noodle pops out of (identical in Pocket) |
 | `reader.js` | opening files, folders, archives, PDFs and links |
 | `sw.js` | offline support |
 | `ziti.glb` | the 3D ziti (v2, sauce + basil) |
@@ -243,6 +264,7 @@ Run it locally with any static server, e.g. `python3 -m http.server`, then open 
 - [x] **v0.4:** face tracking in the background, for a steady 30 fps while recording
 - [x] **v0.5:** 4K 60 on phones: ziti-only anti-aliasing, a self-adjusting smoothness ladder, takes saved straight to storage and kept after a crash
 - [x] **v0.6:** constant-frame-rate recording: the file gets every frame at exactly 30 or 60 fps, with gapless audio
+- [x] **v0.7:** the ziti gets a head, neck and body, and pops up out of a plate of ziti that moves with you
 - [ ] chapter markers: tap as you record, get timestamps for the video description
 - [ ] intro and outro cards with the series title, in BKDziti styling
 - [ ] spotlight: dim everything but the panel you're talking about
