@@ -1,14 +1,15 @@
 // ZitiCam Nippon: a manga reader with the live-face ziti on top, recorded as one video.
 // Everything happens in the browser: pages, camera and takes never leave the device.
 //
-// URL options: ?debug=1  ?autostart=1  ?manga=<link>  ?mp=<MediaPipe base url>  ?notrack=1
+// URL options: ?debug=1  ?autostart=1  ?manga=<link>  ?mp=<MediaPipe base url>  ?notrack=1  ?bench=1 / ?bench=60 (performance check)
 
 import { createZiti, ZITI_ASPECT } from './ziti.js';
 import { createStage } from './stage.js';
 import { bookFromFiles, bookFromUrl, filesFromInput, filesFromDrop, renderTarget } from './reader.js';
 import { wcSupport, WcRecorder } from './recorder-wc.js';
+import { runPerfCheck } from './perf-check.js';
 
-const VERSION = '0.7.0';
+const VERSION = '0.7.1';
 const q = new URLSearchParams(location.search);
 const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -633,8 +634,9 @@ function frame(now) {
 // ---- staying smooth: if the device can't keep up, give up a little ziti quality before the video stutters.
 // Each step is checked: if it didn't actually help, it's undone (the limit is elsewhere) and the ziti stays at full quality.
 const LADDER = {
-  60: [{ every: 1, scale: 1 }, { every: 2, scale: 1 }, { every: 2, scale: 0.75 }, { every: 2, scale: 0.55 }],
-  30: [{ every: 1, scale: 1 }, { every: 1, scale: 0.75 }, { every: 1, scale: 0.55 }],
+  60: [{ every: 1, scale: 1 }, { every: 2, scale: 1 }, { every: 2, scale: 0.75 }, { every: 2, scale: 0.55 }, { every: 2, scale: 0.42 }],
+  // at 30 the ziti is always redrawn every frame: only its sharpness gives way, never the frame rate
+  30: [{ every: 1, scale: 1 }, { every: 1, scale: 0.75 }, { every: 1, scale: 0.55 }, { every: 1, scale: 0.42 }],
 };
 const smooth = { lvl: 0, bad: 0, good: 0, check: null, holdUntil: 0 };
 const rung = () => (LADDER[CFG.fps] || LADDER[30])[smooth.lvl] || LADDER[30][0];
@@ -1111,6 +1113,7 @@ function syncLayoutUI() {
   for (const b of document.querySelectorAll('[data-k]')) b.setAttribute('aria-pressed', String(String(CFG[b.dataset.k]) === b.dataset.v));
   for (const b of document.querySelectorAll('[data-toggle]')) b.setAttribute('aria-pressed', String(!!CFG[b.dataset.toggle]));
   $('zitiOnBtn').setAttribute('aria-pressed', String(CFG.zitiOn));
+  for (const b of document.querySelectorAll('#styleSeg button')) b.setAttribute('aria-pressed', String((b.dataset.style === 'plate') === (CFG.body !== false)));
   $('zitiOnBtn').textContent = CFG.zitiOn ? 'Ziti on' : 'Ziti off';
   $('pipSize').value = pip().h;
   $('pipSizeOut').textContent = Math.round(pip().h * 100) + '%';
@@ -1189,7 +1192,26 @@ function enterApp() {
   if (!ziti.landmarker && ziti.status.tracker !== 'failed') setStatus('Loading face tracker…');
   const link = q.get('manga');
   if (link) { $('urlIn').value = link; loadUrl(link); }
-  else if (!book) openSheet('load');
+  else if (!book && !q.get('bench')) openSheet('load');
+  if (q.get('bench')) perfCheck();
+}
+
+// ?bench=1: run the stage at every recording size and report whether each holds the frame rate (see perf-check.js)
+async function perfCheck() {
+  while (!ziti.status.ready) await new Promise((r) => setTimeout(r, 200));
+  closeSheets();
+  const keep = { quality: CFG.quality, fps: CFG.fps };
+  const fps = q.get('bench') === '60' ? 60 : 30;
+  if (CFG.fps !== fps) setOpt('fps', fps);
+  await runPerfCheck({
+    fps, label: `ZitiCam Nippon ${VERSION} · ${CFG.body === false ? 'classic noodle' : 'on the plate'} · ${CFG.shape}`,
+    lighter: CFG.body === false ? 'Try 30 fps, or close other apps and tabs.' : 'Try the classic noodle (Layout → Style → Classic): it\'s lighter.',
+    setSize: (v) => { if (CFG.quality !== v) setOpt('quality', v); else resetSmooth(); },
+    getFps: () => status.fps, getWork: () => status.work || 0,
+    getStep: () => `step ${smooth.lvl} · ziti ${Math.round(rung().scale * 100)}%`,
+    onPose: (fn) => ziti.setPoseHook(fn),
+    done: () => { setOpt('quality', keep.quality); setOpt('fps', keep.fps); },
+  });
 }
 async function start() {
   const btn = $('startBtn');
@@ -1253,6 +1275,10 @@ function wire() {
     });
   }
   $('zitiOnBtn').addEventListener('click', () => setOpt('zitiOn', !CFG.zitiOn));
+  // the plate is the full look; classic is the lighter floating noodle (handy on an older phone). Each device remembers its own.
+  for (const b of document.querySelectorAll('#styleSeg button')) {
+    b.addEventListener('click', () => { CFG.body = b.dataset.style === 'plate'; ziti.applyLook(); resetSmooth(); saveCfg(); syncLayoutUI(); });
+  }
   for (const b of document.querySelectorAll('[data-preset]')) b.addEventListener('click', () => preset(b.dataset.preset));
   $('pipSize').addEventListener('input', () => { pip().h = +$('pipSize').value; $('pipSizeOut').textContent = Math.round(pip().h * 100) + '%'; saveSoon(); });
 
