@@ -1,18 +1,18 @@
-// The ziti's body: a head, a neck and a body on a noodle that pops up out of a plate of ziti.
+// The ziti's body: a head and a body on a noodle that pops up out of a plate of ziti.
 //
 // It's still one ziti noodle: a straight tube with the sauce on top. The top of the tube is the head,
-// with your real eyes and mouth up near the sauce. Right under the mouth the noodle softens into a neck,
-// and below that the body carries on down into a low bed of ziti in sauce on a plate (see ziti-plate.js).
+// with your real eyes and mouth up near the sauce; below it the body runs down into a low bed of ziti
+// in sauce on a plate (see ziti-plate.js).
 //
-// How it moves (the same idea as a face-tracked puppet whose head is pinned to your face and whose lower
-// half smooth-follows): the head is bound to your face, crisp, no lag. The body's foot is stuck in the
-// plate, so it works like a stalk:
-//   move your head sideways   -> the noodle leans from its base to follow, a beat late, and settles
-//   sit up / slouch           -> it slides up out of the plate / sinks back into it
-//   lean in toward the camera -> it bends toward you
-//   turn or tilt your head    -> the body twists and tilts part of the way with it
-//   talk                      -> the whole noodle bobs with your voice
-// The neck bends and stretches to keep head and body joined, like one piece of cooked pasta.
+// How it moves, the way a face-tracked puppet does: the head is pinned to your face, and everything below
+// it follows less and less of it, smoothed so it trails behind and settles without bouncing:
+//   head   all of it, instantly: where your head is, which way it faces, how it tilts
+//   body   about half of the turn and tilt, a beat late, and it leans over to reach the head, so the whole
+//          noodle faces where you face and leans where you lean
+//   plate  the least: it slides and turns a little toward you, slowest of all
+// The body is a smooth spine of joints from the plate to the head, so it bows in one continuous curve
+// instead of creasing at a neck, and it slides up out of the pasta or back in to keep its length as the
+// head moves away from or toward the plate. Talking gives it a small hop.
 //
 // Shared, unchanged, by ZitiCam Pocket and ZitiCam Nippon.
 
@@ -31,43 +31,23 @@ const SAUCE_FROM = 0.5, SAUCE_K = 0.67;
 // the eyes and mouth move up the head by this much, so they sit near the top with the neck right under the mouth
 const FACE_LIFT = 0.22;
 
-const HEAD_PIVOT = -0.17;   // the head turns about the top of the neck, just under the mouth
-const NECK_Y = -0.30;       // the middle of the soft part
-const BODY_TOP = -0.46;     // below this, all body
-// where the noodle comes up out of the pasta: the body bends about this point, like a stalk
+const HEAD_PIVOT = -0.17;   // the head turns about here, just under the mouth: the top of the spine
+// where the noodle comes up out of the pasta: the bottom of the spine
 const PIVOT_Y = HERO_BASE_Y - 0.04;
-const WAIST_C = -0.27, WAIST_H = 0.14, WAIST = 0.04;   // only a hint of a dip: enough to read as a neck, still a tube
+const SPINE = 8;            // joints from the plate up to the head (the head is the last one)
+const spineY = (k) => PIVOT_Y + (HEAD_PIVOT - PIVOT_Y) * (k / SPINE);
+const SPINE_LEN = HEAD_PIVOT - PIVOT_Y;
 
 const smooth01 = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 const remapY = (y) => (y >= CUT_TOP ? y : y >= CUT_BOT ? CUT_TOP + (y - CUT_TOP) * STRETCH : y - DROP);
 const sauceY = (y) => (y >= SAUCE_FROM ? y : SAUCE_FROM + (y - SAUCE_FROM) * SAUCE_K);
 const BOTTOM = remapY(-0.82);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+// how much of the way to go this frame, to trail a target by `tau` seconds without ever overshooting it
+const ease = (dt, tau) => 1 - Math.exp(-dt / Math.max(1e-3, tau));
 
-// the tube's radius at height y, relative to the modeled noodle: 1 everywhere but a slight waist at the neck
-function girth(y) {
-  const u = (y - WAIST_C) / WAIST_H;
-  return Math.abs(u) >= 1 ? 1 : 1 - WAIST * 0.5 * (1 + Math.cos(Math.PI * u));
-}
-const girthSlope = (y) => (girth(y + 1e-3) - girth(y - 1e-3)) / 2e-3;
-
-// A damped spring, stepped in small slices so a slow frame never makes it explode.
-class Spring {
-  constructor() { this.x = 0; this.v = 0; }
-  step(target, omega, zeta, dt) {
-    const n = Math.max(1, Math.ceil(dt / 0.008)), h = dt / n;
-    for (let i = 0; i < n; i++) {
-      this.v += (omega * omega * (target - this.x) - 2 * zeta * omega * this.v) * h;
-      this.x += this.v * h;
-    }
-    return this.x;
-  }
-  reset(x = 0) { this.x = x; this.v = 0; }
-}
-
-// Shape the tall noodle from the modeled one, keeping the shading right: normals follow the stretch and the
-// change in radius exactly (inverse-transpose of the deformation). Weight each point to the bones, and stain
-// the part that's been down in the sauce.
+// Shape the tall noodle from the modeled one, keeping the shading right (normals follow the stretch), weight
+// each point to the two spine joints either side of it, and stain the part that's been down in the sauce.
 const STAIN = new THREE.Color('#ff7a5c');
 function buildBodyGeometry(src) {
   const g = src.clone();
@@ -81,23 +61,16 @@ function buildBodyGeometry(src) {
     let nx = sn.getX(i), ny = sn.getY(i), nz = sn.getZ(i);
     if (y0 < CUT_TOP && y0 >= CUT_BOT) ny /= STRETCH;
     const y = remapY(y0);
-    const f = girth(y);
-    if (f !== 1) {
-      ny -= (x * nx + z * nz) * girthSlope(y) / f;
-      nx /= f; nz /= f;
-    }
     const l = Math.hypot(nx, ny, nz) || 1;
-    dp.setXYZ(i, x * f, y, z * f);
+    dp.setXYZ(i, x, y, z);
     dn.setXYZ(i, nx / l, ny / l, nz / l);
 
-    // bones: 0 body, 1 neck, 2 head
-    let wB = 0, wN = 0, wH = 0;
-    if (y >= HEAD_PIVOT) wH = 1;
-    else if (y >= NECK_Y) { wH = smooth01(NECK_Y, HEAD_PIVOT, y); wN = 1 - wH; }
-    else if (y >= BODY_TOP) { wN = smooth01(BODY_TOP, NECK_Y, y); wB = 1 - wN; }
-    else wB = 1;
-    skinIndex.set([0, 1, 2, 0], i * 4);
-    skinWeight.set([wB, wN, wH, 0], i * 4);
+    // joints: 0 where it leaves the pasta ... SPINE the head. Between two joints, a point blends them, so the
+    // tube follows the spine's curve smoothly.
+    const f = clamp((y - PIVOT_Y) / SPINE_LEN, 0, 1) * SPINE;
+    const k0 = Math.min(SPINE, Math.floor(f)), k1 = Math.min(SPINE, k0 + 1), w = f - k0;
+    skinIndex.set([k0, k1, 0, 0], i * 4);
+    skinWeight.set([1 - w, w, 0, 0], i * 4);
 
     // sauce clings to the noodle a little above where it comes out of the heap, in an uneven line with a few runs
     const ang = Math.atan2(z, x), ca = Math.cos(ang), sa = Math.sin(ang);
@@ -162,23 +135,24 @@ export function createZitiRig() {
   const object = new THREE.Group();
   object.name = 'ZitiRig';
 
-  // Bones sit side by side (not in a chain): each frame sets where each one is, the skin blends between them.
-  const bones = ['Body', 'Neck', 'Head'].map((name) => { const b = new THREE.Bone(); b.name = name; object.add(b); return b; });
-  const [bodyBone, neckBone, headBone] = bones;
-  const REST_Y = [PIVOT_Y, NECK_Y, HEAD_PIVOT];
-  bones.forEach((b, i) => b.position.set(0, REST_Y[i], 0));
-  const LEVER = NECK_Y - PIVOT_Y;   // from where it leaves the heap up to the neck
+  // The spine's joints sit side by side (not in a chain): each frame sets where each one is along a smooth curve
+  // from the plate to the head, and the skin blends between them.
+  const bones = [];
+  for (let k = 0; k <= SPINE; k++) { const b = new THREE.Bone(); b.name = k === SPINE ? 'Head' : 'Spine' + k; object.add(b); bones.push(b); }
+  const baseBone = bones[0], headBone = bones[SPINE];
+  const REST_Y = bones.map((_, k) => spineY(k));
+  bones.forEach((b, k) => b.position.set(0, REST_Y[k], 0));
 
   // Anything placed in headSpace / bodySpace uses the noodle's rest coordinates and rides that bone.
   const headSpace = new THREE.Group(); headSpace.name = 'HeadSpace';
   headSpace.position.y = -HEAD_PIVOT; headBone.add(headSpace);
   const bodySpace = new THREE.Group(); bodySpace.name = 'BodySpace';
-  bodySpace.position.y = -PIVOT_Y; bodyBone.add(bodySpace);
+  bodySpace.position.y = -PIVOT_Y; baseBone.add(bodySpace);
 
   let skinned = null, classic = null, dish = null, keyLight = null;
   let sauceClassic = null, sauceBody = null;
   let bodyOn = true, sauceOn = true;
-  const hullHead = [], hullBody = [], hullClassic = [];
+  const hullHead = [], hullBody = [], hullClassic = [], hullJoint = [];
   const framePts = { body: [], classic: [] };
 
   // root: the loaded ziti.glb scene. prepare(material): the app's finishing touch for new materials (its tone curve).
@@ -226,14 +200,16 @@ export function createZitiRig() {
       for (let i = 0; i < p.count; i++) { v.fromBufferAttribute(p, i); r = Math.max(r, Math.hypot(v.x, v.z)); top = Math.max(top, v.y); bot = Math.min(bot, v.y); }
     }
     r *= 1.04; top += 0.03; bot -= 0.03;
-    ring(hullHead, r, NECK_Y - 0.06); ring(hullHead, r, top);
-    ring(hullBody, r, BOTTOM - 0.03); ring(hullBody, r, CUT_TOP);
+    ring(hullHead, r, HEAD_PIVOT - 0.04); ring(hullHead, r, top);
+    ring(hullBody, r, BOTTOM - 0.03);
+    ring(hullJoint, r, 0, 10);   // around each spine joint
     ring(hullClassic, r, bot); ring(hullClassic, r, top);
 
     // what the camera has to keep in view: the plate (as tilted) and the head with room to drift up
     object.updateMatrixWorld(true);
     const toObj = new THREE.Matrix4().copy(object.matrixWorld).invert().multiply(dish.space.matrixWorld);
-    framePts.body = [...dish.hull.map((p) => p.clone().applyMatrix4(toObj))];
+    framePts.body = [];
+    for (const dx of [-0.13, 0.13]) for (const p of dish.hull) framePts.body.push(p.clone().applyMatrix4(toObj).add(new THREE.Vector3(dx, 0, 0)));   // the plate drifts a little
     // room for the head to roam: popped up, and leaning out to either side
     for (const dx of [-0.42, 0, 0.42]) {
       const pts = []; ring(pts, r, top + (dx ? 0.12 : 0.3));
@@ -267,7 +243,7 @@ export function createZitiRig() {
     U.uZitiK.value = bodyOn ? 0.4 : 0;
     if (!bodyOn) return;
     // the visible noodle, from where it leaves the pasta to the top of its head, in world space
-    heroA.copy(bodyBone.position);
+    heroA.copy(baseBone.position);
     heroB.set(0, 0.9 - HEAD_PIVOT, 0).multiply(headBone.scale).applyQuaternion(headBone.quaternion).add(headBone.position);
     U.uZitiA.value.copy(heroA).applyMatrix4(object.matrixWorld);
     U.uZitiB.value.copy(heroB).applyMatrix4(object.matrixWorld);
@@ -284,26 +260,21 @@ export function createZitiRig() {
   }
 
   // ---- motion
-  const S = {
-    rise: new Spring(),                                           // how far it's popped up out of the plate
-    yaw: new Spring(), pitch: new Spring(), roll: new Spring(),   // how it's twisted and leaning
-    hz: new Spring(), talk: new Spring(),
-  };
   // how far the head roams over the plate, compared with the classic noodle's drift
   const REACH_X = 1.8, REACH_Y = 1.6;
+  const IDENT = new THREE.Quaternion(), UP = new THREE.Vector3(0, 1, 0);
+  const st = { bodyQ: new THREE.Quaternion(), lean: new THREE.Vector3(0, 1, 0), slide: 0, talk: 0, hz: 0, plateX: 0, plateZ: 0, plateYaw: 0 };
   const e = new THREE.Euler(0, 0, 0, 'YXZ');
-  const qB = new THREE.Quaternion(), qN = new THREE.Quaternion();
-  const tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3(), tmpS = new THREE.Vector3();
-  let t0 = null;
+  const qT = new THREE.Quaternion(), qK = new THREE.Quaternion(), qA = new THREE.Quaternion();
+  const P0 = new THREE.Vector3(), P1 = new THREE.Vector3(), T0 = new THREE.Vector3(), T1 = new THREE.Vector3(), anchor = new THREE.Vector3();
+  const tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3(), tmpS = new THREE.Vector3(), tan = new THREE.Vector3();
 
   // in: head turn (quaternion, already smoothed), head drift (x, y: where your head is in the camera, in glTF
   // units, as the classic noodle drifts), jaw 0..1, lean (+ = toward the camera). opts: bounce (talk squash and
-  // bob), follow (0..1, how much the body copies the head's turn), wobble (0..1, how springy it is).
-  // dt in seconds, now in ms.
-  function update({ quat, x = 0, y = 0, jaw = 0, lean = 0 }, opts, dt, now) {
+  // hop), follow (0..1, how much of the head's turn and tilt the body takes), wobble (0..1, how far behind it
+  // trails). dt in seconds.
+  function update({ quat, x = 0, y = 0, jaw = 0, lean = 0 }, opts, dt) {
     const bounce = opts.bounce ?? 2, follow = opts.follow ?? 0.5, wobble = opts.wobble ?? 0.5;
-    if (t0 === null) t0 = now;
-    const t = (now - t0) / 1000;
 
     // talking squashes the head up and in, about its base (on the plate) or its middle (classic)
     const sy = 1 + 0.035 * jaw * bounce, sxz = 1 - 0.015 * jaw * bounce;
@@ -319,46 +290,69 @@ export function createZitiRig() {
       return;
     }
 
+    const share = 0.3 + 0.5 * follow;   // the body takes this much of the head's turn and tilt (0.55 by default)
+    const lag = 0.1 + 0.45 * wobble;     // seconds the body trails behind (a third of a second by default)
     e.setFromQuaternion(quat, 'YXZ');
-    const zeta = 0.95 - 0.6 * wobble, omega = 10.5 + 6 * wobble;
-    const breath = Math.sin(t * 2 * Math.PI * 0.21);   // a slow breath, so it's never quite still
 
-    // where the head wants to be: your head's spot in the camera, scaled up to roam over the plate
-    const hx = clamp(x * REACH_X, -0.62, 0.62);
-    const hy = clamp(y * REACH_Y, -0.24, 0.32);
-    const hz = S.hz.step(clamp(lean, -0.25, 0.4), 9, 0.9, dt);
-    // talking: a quick springy hop with your voice
-    const talk = S.talk.step(jaw * bounce * 0.035, 22, 0.32, dt);
+    // ---- head: pinned to your face. Crisp, no smoothing of its own: this is the part people read.
+    st.hz += (clamp(lean, -0.25, 0.4) - st.hz) * ease(dt, 0.12);
+    st.talk += (jaw * bounce * 0.03 - st.talk) * ease(dt, 0.05);
+    P1.set(clamp(x * REACH_X, -0.62, 0.62), HEAD_PIVOT + clamp(y * REACH_Y, -0.24, 0.32) + st.talk, st.hz);
+    T1.copy(UP).applyQuaternion(quat);
 
-    // ---- body: a stalk stuck in the plate. Up/down slides it out of the pasta or back in; sideways and
-    // toward-the-camera bend it from its base so its top reaches the head. All on springs, a beat late.
-    const rise = S.rise.step(hy, 7, 0.7, dt);
-    const reach = LEVER + rise;
-    const leanZ = -Math.atan2(hx, reach) + e.z * 0.5 * follow;
-    const leanX = Math.atan2(hz, reach) + e.x * 0.35 * follow;
-    const roll = S.roll.step(leanZ, omega, zeta, dt);
-    const pitch = S.pitch.step(leanX, omega, zeta, dt);
-    const yaw = S.yaw.step(e.y * 0.7 * follow, omega * 0.85, zeta, dt);
-    qB.setFromEuler(e.set(pitch, yaw, roll, 'YXZ'));
-    bodyBone.quaternion.copy(qB);
-    // it slides along its own leaning axis, so it always comes up out of the same spot in the pasta
-    tmpA.set(0, rise + talk, 0).applyQuaternion(qB);
-    bodyBone.position.set(0, PIVOT_Y, 0).add(tmpA);
-    bodyBone.scale.set(1 - 0.004 * breath, 1 + 0.006 * breath, 1 - 0.004 * breath);
+    // ---- plate: follows least and slowest. It slides and turns a little toward where you are.
+    const pl = ease(dt, lag * 1.8);
+    st.plateX += (P1.x * 0.2 - st.plateX) * pl;
+    st.plateZ += (st.hz * 0.12 - st.plateZ) * pl;
+    st.plateYaw += (e.y * 0.15 - st.plateYaw) * pl;
+    if (dish) { dish.group.position.set(st.plateX, 0, st.plateZ); dish.group.rotation.set(0, st.plateYaw, 0); }
+    anchor.set(st.plateX, PIVOT_Y, st.plateZ);   // the hole in the pasta it comes up through
 
-    // ---- head: bound to the face. Crisp, no springs: this is the part people read. It rides the talk hop.
+    // ---- body: takes part of the head's turn and tilt, a beat late, and leans over toward the head.
+    const bl = ease(dt, lag);
+    qT.slerpQuaternions(IDENT, quat, share);
+    st.bodyQ.slerp(qT, bl);
+    // its own share of the head's tilt, plus most of the lean it takes to reach the head where it's gone
+    tmpA.subVectors(P1, anchor).normalize().sub(UP);
+    tmpB.copy(UP).applyQuaternion(st.bodyQ).addScaledVector(tmpA, 0.85).normalize();
+    st.lean.lerp(tmpB, bl).normalize();
+    T0.copy(st.lean);
+    // it keeps its length by sliding out of the pasta or back in, so reaching for the head never stretches it
+    const want = clamp(P1.distanceTo(anchor) - SPINE_LEN, -0.3, 0.32);
+    st.slide += (want - st.slide) * bl;
+    P0.copy(anchor).addScaledVector(T0, st.slide);
+
+    // ---- the spine: one smooth curve from the base to the head (Hermite), so the noodle never creases. A long
+    // lead-out at the base keeps the body fairly straight, like a stiff noodle leaning; a short one at the head
+    // gathers the bend in the top third, just under the head. The turn passes up it the same way: the body's
+    // share at the bottom, all of the head's at the top.
+    const L = P0.distanceTo(P1), m0 = L * 1.15, m1 = L * 0.55;
+    for (let k = 0; k <= SPINE; k++) {
+      const u = k / SPINE, u2 = u * u, u3 = u2 * u;
+      const b = bones[k];
+      b.position.copy(P0).multiplyScalar(2 * u3 - 3 * u2 + 1)
+        .addScaledVector(T0, m0 * (u3 - 2 * u2 + u))
+        .addScaledVector(P1, -2 * u3 + 3 * u2)
+        .addScaledVector(T1, m1 * (u3 - u2));
+      tan.copy(P0).multiplyScalar(6 * u2 - 6 * u)
+        .addScaledVector(T0, m0 * (3 * u2 - 4 * u + 1))
+        .addScaledVector(P1, -6 * u2 + 6 * u)
+        .addScaledVector(T1, m1 * (3 * u2 - 2 * u)).normalize();
+      qK.slerpQuaternions(st.bodyQ, quat, u2 * u2 * (5 - 4 * u));   // mostly in the top third
+      // stand the joint along the curve, keeping its twist
+      qA.setFromUnitVectors(tmpA.copy(UP).applyQuaternion(qK), tan);
+      b.quaternion.copy(qA).multiply(qK);
+      if (k < SPINE) b.scale.set(1, 1, 1);
+    }
+    headBone.position.copy(P1);
     headBone.quaternion.copy(quat);
-    headBone.position.set(hx, HEAD_PIVOT + hy + talk + 0.006 * breath, hz);
-
-    // ---- neck: halfway between, in place and in turn, so the soft part bends evenly
-    tmpA.set(0, NECK_Y - PIVOT_Y, 0).multiply(bodyBone.scale).applyQuaternion(qB).add(bodyBone.position);
-    tmpB.set(0, NECK_Y - HEAD_PIVOT, 0).applyQuaternion(quat).add(headBone.position);
-    neckBone.position.addVectors(tmpA, tmpB).multiplyScalar(0.5);
-    neckBone.quaternion.copy(qN.slerpQuaternions(qB, quat, 0.5));
     placeShadow();
   }
 
-  function reset() { for (const s of Object.values(S)) s.reset(); }
+  function reset() {
+    st.bodyQ.identity(); st.lean.copy(UP);
+    st.slide = st.talk = st.hz = st.plateX = st.plateZ = st.plateYaw = 0;
+  }
 
   // the figure's outline points in world space (call after the scene's matrices are up to date)
   const outHull = [];
@@ -367,7 +361,11 @@ export function createZitiRig() {
     const add = (pts, space) => {
       for (const p of pts) { (outHull[k] ||= new THREE.Vector3()).copy(p).applyMatrix4(space.matrixWorld); k++; }
     };
-    if (bodyOn) { add(hullHead, headSpace); add(hullBody, bodySpace); if (dish) add(dish.hull, dish.space); } else add(hullClassic, headSpace);
+    if (bodyOn) {
+      add(hullHead, headSpace); add(hullBody, bodySpace);
+      for (let j = 0; j < SPINE; j++) add(hullJoint, bones[j]);
+      if (dish) add(dish.hull, dish.space);
+    } else add(hullClassic, headSpace);
     outHull.length = k;
     return outHull;
   }

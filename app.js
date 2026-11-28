@@ -9,7 +9,7 @@ import { bookFromFiles, bookFromUrl, filesFromInput, filesFromDrop, renderTarget
 import { wcSupport, WcRecorder } from './recorder-wc.js';
 import { runPerfCheck } from './perf-check.js';
 
-const VERSION = '0.7.1';
+const VERSION = '0.7.2';
 const q = new URLSearchParams(location.search);
 const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -1145,7 +1145,7 @@ const SLIDERS = [
   ]],
   ['Body', [
     ['follow', 'Body follow', 0, 1, 0.01],
-    ['wobble', 'Wobble', 0, 1, 0.01],
+    ['wobble', 'Body lag', 0, 1, 0.01],
   ]],
   ['Inside the frame', [
     ['zoom', 'Ziti size', 0.6, 1.6, 0.01],
