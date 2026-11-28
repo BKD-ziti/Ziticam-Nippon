@@ -10,7 +10,7 @@ Open a chapter, put the noodle where you want it, hit record, and talk. The vide
 
 ### [Open ZitiCam Nippon](https://bkd-ziti.github.io/Ziticam-Nippon/)
 
-![version 0.7.0](https://img.shields.io/badge/version-0.7.0-e8b45a?style=flat-square)
+![version 0.7.1](https://img.shields.io/badge/version-0.7.1-e8b45a?style=flat-square)
 ![runs on phone and PC](https://img.shields.io/badge/runs_on-phone_and_PC-c8432b?style=flat-square)
 ![works offline](https://img.shields.io/badge/works-offline-7fbf6a?style=flat-square)
 ![nothing uploaded](https://img.shields.io/badge/nothing-uploaded-b49f84?style=flat-square)
@@ -51,7 +51,9 @@ It's rigged like a face-tracked puppet: the head is pinned to your face, and eve
 | turn or tilt your head | the head turns with you; the body twists and tilts part of the way |
 | talk | the head squashes with your jaw and the whole noodle bobs with your voice |
 
-The head never lags: it's the part people read. The springs are all below the neck, which is where the life comes from. **Look → Body follow** sets how much the body copies the head's turn, **Look → Wobble** how springy it is, and **Plate** switches back to the classic floating noodle.
+The head never lags: it's the part people read. The springs are all below the neck, which is where the life comes from. **Look → Body follow** sets how much the body copies the head's turn, **Look → Wobble** how springy it is.
+
+**Layout → Style** switches between **On the plate** and **Classic**, the original floating noodle. Classic is the lighter of the two, handy on an older phone; each device remembers its own choice, so your phone can stay on Classic while your PC keeps the plate.
 
 The plate is built in code when the app opens: no extra download, and it works offline like everything else.
 
@@ -164,8 +166,9 @@ Tall pages (webtoons, or **Fit → Width**) scroll down before they turn.
 Nippon is built so a recent phone can record 4K at 60 fps:
 
 - **The face tracker runs in the background,** so the page only has to draw and record each frame.
+- **The plate's shadows are worked out once, when it's built.** Nothing on the plate moves relative to the light, so the pasta's shadows on itself and on the glaze are baked into its colors instead of being redrawn every frame; only the noodle's own shadow is live, and it's a few lines of math per pixel rather than a shadow map. That cut the plate's drawing cost almost in half; it now costs a little more than the classic noodle, not three times as much.
 - **Only the ziti is anti-aliased.** The page is a flat rectangle and doesn't need it, so a 4K frame costs a fraction of what it would.
-- **It stays smooth on its own.** If the phone can't keep up, Nippon first redraws the noodle every other frame (the face is only measured 30 times a second anyway, and pages, zooms, page turns and the ziti's box all still move at the full 60), then draws it a little softer, so the video keeps its frame rate instead of stuttering. Every step is checked: if it doesn't actually help, it's undone and the ziti stays at full quality. It steps back up when there's room.
+- **It stays smooth on its own.** If the phone can't keep up, Nippon first redraws the noodle every other frame (the face is only measured 30 times a second anyway, and pages, zooms, page turns and the ziti's box all still move at the full 60), then draws it a little softer, so the video keeps its frame rate instead of stuttering. At 30 fps the noodle is always redrawn every frame; only its sharpness gives way. Every step is checked: if it doesn't actually help, it's undone and the ziti stays at full quality. It steps back up when there's room.
 - **The file is a true constant frame rate.** Every frame the stage draws goes straight to the phone's hardware video encoder, stamped at exactly 1/30 (or 1/60) of a second apart. If the phone hiccups and misses a beat, that beat is filled with the current picture instead of being left out, so a 30 fps setting gives a 30 fps file, in sync with your voice.
 - **Takes save straight to the phone's storage** as you record, so a long 4K take never has to fit in memory.
 
@@ -176,6 +179,7 @@ If it still dips:
 - **Keep the phone cool and plugged in** for long takes. A hot phone slows itself down.
 - **Close other apps and tabs,** especially anything else using the camera.
 - **Check how it's recording:** open the app with `?debug=1`. The *recorder* line says **WebCodecs** when takes are constant frame rate; on older iPhones (before iOS 26) it says *built-in recorder*, which keeps every frame drawn but can't fill hiccups. *frames · repeated* shows how many beats had to be filled.
+- **Run the performance check:** open the app with `?bench=1` (or `?bench=60`), tap **Start camera**, and keep the tab in front for about a minute. It runs the stage at 720p, 1080p and 4K with a moving, talking ziti and shows, for each size, whether it holds the frame rate, the lowest second, and how far the smoothness ladder had to step. Run it on each device you film with.
 - **Check where the time goes:** in the same stats, *frame work* is what each frame costs the page; it should sit well under the *budget* (33 ms at 30 fps, 16 ms at 60). *smoothness step* shows whether Nippon is easing off the ziti. *tracked* is how often the face is read; if that's low while *render* holds 30, the video stays smooth and only the face updates less often.
 
 ## good to know
@@ -210,6 +214,7 @@ If it still dips:
 | --- | --- |
 | `?manga=<link>` | open a chapter straight away |
 | `?debug=1` | stats on from the start, including per-frame cost |
+| `?bench=1` / `?bench=60` | the performance check: every recording size at 30 (or 60) fps, with a pass or fail for each |
 | `?autostart=1` | skip the start screen |
 | `?notrack=1` | run without the face tracker |
 | `?track=page` | run the face tracker on the page instead of in the background |
@@ -224,7 +229,7 @@ If it still dips:
 
 - **Face tracking:** Google MediaPipe Face Landmarker 0.10.35, bundled with the site so it works offline, with the CDN as a fallback. 478 face points plus a jaw-open score. It runs in a background worker, so a slow face check never delays a video frame; each answer comes back with the exact camera frame it measured, so the eyes and mouth stay lined up. Browsers that can't run it in the background run it on the page, as before.
 - **The noodle:** three.js r169 rendering `ziti.glb` onto a transparent canvas, tuned identically to ZitiCam Pocket. On the plate it's a skinned mesh with three bones (body, neck, head), shaped from the same model in code: the head is the modeled noodle untouched, the lower part is stretched into the neck and body, and the sauce drips are shortened so they stay on the head. The head bone is set straight from the face tracker; the body bone is driven by damped springs that aim it at the head from its base in the plate; the neck sits halfway between in position and turn so it bends evenly.
-- **The plate:** built at load in `ziti-plate.js`. Small ziti are dropped onto the plate one at a time and come to rest on whatever's already there (a height map keeps track), so they settle like real pasta; the ones buried under the sauce aren't drawn at all. The sauce is poured over that exact layer, then basil, tomato, herbs and parmesan go on top. Soft shadows from the key light give the pasta its depth.
+- **The plate:** built at load in `ziti-plate.js`. Small ziti are dropped onto the plate one at a time and come to rest on whatever's already there (a height map keeps track), so they settle like real pasta; the ones buried under the sauce aren't drawn at all. The sauce is poured over that exact layer, then basil, tomato, herbs and parmesan go on top. The pasta's shadows are marched over the same height map once and baked into its colors; the noodle's own shadow on the plate is a soft capsule worked out per pixel from where it is, so there's no shadow map to draw.
 - **The stage:** pages, backdrop and ziti are drawn together on the GPU, 30 or 60 times a second, at 720p, 1080p or 4K. The ziti renders into its own 4x anti-aliased image sized to its box, which is kept between frames, so moving the ziti never redraws it; the full frame isn't anti-aliased, which is most of the saving at 4K. The noodle applies three.js's Neutral tone curve itself, so it looks exactly as before. Each page is uploaded to the GPU once, before its page turn starts, so turns don't hitch either. The recorder captures that canvas plus your mic: H.264 MP4 where the browser supports it (Safari, Chrome), asking for the H.264 level each size needs (4.0 up to 5.2 for 4K60), and WebM where MP4 isn't available.
 - **Recording:** with WebCodecs (iOS 26+, recent Chrome and Edge), each drawn frame is captured from the GPU right after it's drawn and handed to the hardware H.264 encoder with an exact timestamp; [Mediabunny](https://mediabunny.dev) writes the MP4 (fragmented, so it survives a crash). Audio is captured on the audio thread by an AudioWorklet, so busy drawing can never cause gaps, and is timestamped by sample count. Where WebCodecs can't record with sound, the browser's built-in recorder is used, handed exactly one frame per drawn frame.
 - **Audio:** the recorder records one steady audio line, and the mic plugs into it. If the device interrupts the mic mid-take, the take gets a moment of silence instead of a broken audio track, and the mic is reconnected. The camera is never restarted during a take, since that can cut the mic on iPhone.
@@ -246,6 +251,7 @@ If it still dips:
 | `ziti.js` | the live-face ziti (shared design with Pocket) |
 | `ziti-rig.js` | the head, neck and body, and how they move (identical in Pocket) |
 | `ziti-plate.js` | the plate of ziti the noodle pops out of (identical in Pocket) |
+| `perf-check.js` | the `?bench=1` performance check (identical in Pocket) |
 | `reader.js` | opening files, folders, archives, PDFs and links |
 | `sw.js` | offline support |
 | `ziti.glb` | the 3D ziti (v2, sauce + basil) |
@@ -265,6 +271,7 @@ Run it locally with any static server, e.g. `python3 -m http.server`, then open 
 - [x] **v0.5:** 4K 60 on phones: ziti-only anti-aliasing, a self-adjusting smoothness ladder, takes saved straight to storage and kept after a crash
 - [x] **v0.6:** constant-frame-rate recording: the file gets every frame at exactly 30 or 60 fps, with gapless audio
 - [x] **v0.7:** the ziti gets a head, neck and body, and pops up out of a plate of ziti that moves with you
+- [x] **v0.7.1:** the plate at half the cost, a Plate / Classic switch in Layout, and a built-in performance check
 - [ ] chapter markers: tap as you record, get timestamps for the video description
 - [ ] intro and outro cards with the series title, in BKDziti styling
 - [ ] spotlight: dim everything but the panel you're talking about

@@ -58,19 +58,19 @@ function buildPlate(prepare) {
   const col = new Float32Array(geo.attributes.position.count * 3);
   const glaze = new THREE.Color('#efe9df'), gold = new THREE.Color('#d9a441');
   const n = PLATE_PROFILE.length;
-  for (let i = 0; i < geo.attributes.position.count; i++) {
-    const c = PLATE_PROFILE[i % n][2] ? gold : glaze;
+  const pos = geo.attributes.position, c = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    c.copy(PLATE_PROFILE[i % n][2] ? gold : glaze);
+    if (pos.getY(i) > 0.02 || Math.hypot(pos.getX(i), pos.getZ(i)) < 0.9) c.multiplyScalar(shadeAt(pos.getX(i), pos.getY(i), pos.getZ(i)));   // the pasta's shadow on the glaze
     col.set([c.r, c.g, c.b], i * 3);
   }
   geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  const mat = new THREE.MeshPhysicalMaterial({
-    name: 'Plate', vertexColors: true, roughness: 0.16, clearcoat: 1, clearcoatRoughness: 0.06,
-    envMapIntensity: 0.8, side: THREE.DoubleSide,
-  });
+  // glazed: a low roughness gives the shine; no clearcoat, which costs a second highlight on every pixel of the plate
+  const mat = new THREE.MeshStandardMaterial({ name: 'Plate', vertexColors: true, roughness: 0.12, envMapIntensity: 0.9, side: THREE.DoubleSide });
   prepare(mat);
+  addHeroShadow(mat);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.name = 'Plate';
-  mesh.receiveShadow = true;
   return mesh;
 }
 
@@ -262,19 +262,90 @@ function blanketY(x, z) {
 }
 const surfaceAt = (x, z) => Math.max(HEAP.hard(x, z), blanketY(x, z));
 
+// ---- light and shade, baked once. Nothing on the plate moves relative to the key light, so its shadows are
+// worked out here from the height map instead of being re-drawn by the GPU every frame (that was half the
+// cost of a frame). Only the hero noodle moves; its shadow is the cheap live one below.
+const KEY_DIR = new THREE.Vector3(-2.2, 3.2, 4.0).normalize()                 // toward the key light (the apps' light rig)
+  .applyAxisAngle(new THREE.Vector3(1, 0, 0), -DISH.tilt);                   // as seen from the tilted plate
+// how much key light reaches (x, y, z) (y above the glaze): a soft shadow marched over the height map
+function litAt(x, y, z) {
+  let res = 1, t = 0.04;
+  for (let i = 0; i < 48 && t < 1.8; i++) {
+    const h = HEAP.hard(x + KEY_DIR.x * t, z + KEY_DIR.z * t);
+    res = Math.min(res, 7 * (y + 0.012 + KEY_DIR.y * t - h) / t);
+    if (res <= 0) return 0;
+    t += 0.02 + t * 0.07;
+  }
+  return clamp(res, 0, 1);
+}
+// how tucked in (x, y, z) is: the more pasta around and above it, the less light gets in
+function openAt(x, y, z) {
+  let occ = 0;
+  for (let k = 0; k < 8; k++) {
+    const a = (k / 8) * TAU;
+    for (const d of [0.07, 0.15, 0.27]) occ += clamp((HEAP.hard(x + Math.cos(a) * d, z + Math.sin(a) * d) - y) / (d * 1.6), 0, 1);
+  }
+  return 1 - 0.42 * clamp(occ / 24 * 1.6, 0, 1);
+}
+const shadeAt = (x, y, z) => (0.6 + 0.4 * litAt(x, y, z)) * openAt(x, y, z);
+
+// ---- the hero's shadow: a soft capsule worked out per pixel from where the noodle is right now (a few dot
+// products, no shadow map). The rig fills these in every frame.
+export const HERO_SHADOW = {
+  uZitiA: { value: new THREE.Vector3(0, -1, 0) },   // where the noodle leaves the pasta (world)
+  uZitiB: { value: new THREE.Vector3(0, 1, 0) },    // the top of its head (world)
+  uZitiR: { value: 0.53 },                          // its radius
+  uZitiL: { value: new THREE.Vector3(-2.2, 3.2, 4.0).normalize() },   // toward the key light (world)
+  uZitiK: { value: 0.4 },                           // how dark
+};
+const HERO_SHADOW_GLSL = /* glsl */`
+uniform vec3 uZitiA; uniform vec3 uZitiB; uniform float uZitiR; uniform vec3 uZitiL; uniform float uZitiK;
+varying vec3 vZitiWorld;
+float zitiHeroShadow( vec3 p ) {
+  vec3 a = uZitiA - p, b = uZitiB - p;
+  vec3 a2 = a - dot( a, uZitiL ) * uZitiL, b2 = b - dot( b, uZitiL ) * uZitiL;   // looking down the light ray from p
+  vec3 ab = b2 - a2;
+  float t = clamp( -dot( a2, ab ) / max( dot( ab, ab ), 1e-5 ), 0.0, 1.0 );
+  float d = length( a2 + ab * t );
+  float toward = step( 0.0, dot( mix( a, b, t ), uZitiL ) );                       // the noodle is between p and the light
+  return 1.0 - uZitiK * toward * ( 1.0 - smoothstep( uZitiR * 0.55, uZitiR * 1.6, d ) );
+}
+`;
+// add the hero's shadow to a material, on top of whatever the app's prepare() already did
+export function addHeroShadow(m) {
+  const prev = m.onBeforeCompile, prevKey = m.customProgramCacheKey;
+  m.onBeforeCompile = (sh, r) => {
+    prev.call(m, sh, r);
+    Object.assign(sh.uniforms, HERO_SHADOW);
+    sh.vertexShader = 'varying vec3 vZitiWorld;\n' + sh.vertexShader.replace('#include <project_vertex>', `#include <project_vertex>
+      { vec4 zw = vec4( transformed, 1.0 );
+      #ifdef USE_INSTANCING
+        zw = instanceMatrix * zw;
+      #endif
+        vZitiWorld = ( modelMatrix * zw ).xyz; }`);
+    sh.fragmentShader = HERO_SHADOW_GLSL + sh.fragmentShader.replace('#include <opaque_fragment>', '#include <opaque_fragment>\n  gl_FragColor.rgb *= zitiHeroShadow( vZitiWorld );');
+  };
+  m.customProgramCacheKey = () => prevKey.call(m) + '+hero-shadow';
+  m.needsUpdate = true;
+  return m;
+}
+
 
 // ---- sauce over the heap: a lumpy blanket settled into the gaps, thick around the hero, thin at the edge
 function buildSauceBlanket() {
   const RINGS = 34, SEGS = 112, R = SAUCE_R, H = DISH.heroR;
-  const pos = [], uv = [], idx = [];
+  const pos = [], uv = [], idx = [], col = [];
   for (let i = 0; i <= RINGS; i++) {
     for (let j = 0; j <= SEGS; j++) {
       const a = (j / SEGS) * TAU;
       const edge = sauceEdge(a) * 0.9999;
       const r = H * 0.9 + (edge - H * 0.9) * (i / RINGS);
       const x = Math.cos(a) * r, z = Math.sin(a) * r;
-      pos.push(x, DISH.plateY + blanketY(x, z), z);
+      const y = blanketY(x, z);
+      pos.push(x, DISH.plateY + y, z);
       uv.push(0.185 + (x / R) * 0.155, 0.82 + (z / R) * 0.155);   // the round sauce patch in the sauce texture
+      const k = shadeAt(x, y, z);
+      col.push(k, k, k);
     }
   }
   for (let i = 0; i < RINGS; i++) {
@@ -286,6 +357,7 @@ function buildSauceBlanket() {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   g.setIndex(idx);
   g.computeVertexNormals();
   return g;
@@ -362,10 +434,11 @@ export function buildDish({ pasta, sauce, prepare = () => {} }) {
   const c = new THREE.Color();
   all.forEach((p, i) => {
     pile.setMatrixAt(i, p.m);
-    c.setRGB(1, 0.96 - 0.05 * p.warm, 0.88 - 0.1 * p.warm).multiplyScalar(p.tone);
+    const lit = shadeAt(p.pos.x, p.pos.y - DISH.plateY + p.rad * 0.9, p.pos.z);
+    c.setRGB(1, 0.96 - 0.05 * p.warm, 0.88 - 0.1 * p.warm).multiplyScalar(p.tone * (0.45 + 0.55 * lit));
     pile.setColorAt(i, c);
   });
-  pile.castShadow = true; pile.receiveShadow = true;
+  addHeroShadow(pileMat);
   tilted.add(pile);
 
   // sauce
@@ -373,12 +446,13 @@ export function buildDish({ pasta, sauce, prepare = () => {} }) {
   sauceMat.name = 'PileSauce';
   sauceMat.side = THREE.DoubleSide;
   sauceMat.color = new THREE.Color(0.8, 0.74, 0.72);   // deeper than the drips on the head: it's been simmered
-  sauceMat.roughness = 0.34;
-  if ('clearcoat' in sauceMat) { sauceMat.clearcoat = 0.45; sauceMat.clearcoatRoughness = 0.22; }
+  sauceMat.roughness = 0.3;
+  sauceMat.vertexColors = true;
+  if ('clearcoat' in sauceMat) sauceMat.clearcoat = 0;   // a second highlight over this much sauce isn't worth its cost
   prepare(sauceMat);
+  addHeroShadow(sauceMat);
   const blanket = new THREE.Mesh(buildSauceBlanket(), sauceMat);
   blanket.name = 'SauceBlanket';
-  blanket.castShadow = true; blanket.receiveShadow = true;
   tilted.add(blanket);
   const rand = rng(77);
 
@@ -392,10 +466,10 @@ export function buildDish({ pasta, sauce, prepare = () => {} }) {
     }
     chunkGeo.computeVertexNormals();
   }
-  const chunkMat = new THREE.MeshPhysicalMaterial({ name: 'Tomato', color: '#ffffff', roughness: 0.42, clearcoat: 0.3, clearcoatRoughness: 0.3 });
-  prepare(chunkMat);
+  const chunkMat = new THREE.MeshStandardMaterial({ name: 'Tomato', color: '#ffffff', roughness: 0.32 });
+  prepare(chunkMat); addHeroShadow(chunkMat);
   const herbMat = new THREE.MeshStandardMaterial({ name: 'Herbs', color: '#ffffff', roughness: 0.6 });
-  prepare(herbMat);
+  prepare(herbMat); addHeroShadow(herbMat);
   const CHUNKS = 24, HERBS = 190;
   const chunks = new THREE.InstancedMesh(chunkGeo, chunkMat, CHUNKS);
   const herbs = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 0), herbMat, HERBS);
@@ -410,7 +484,7 @@ export function buildDish({ pasta, sauce, prepare = () => {} }) {
       if (y < 0 || HEAP.hard(x, z) > y + 0.01) continue;   // only where the sauce is on top
       const s = 0.018 + rand() * 0.02;
       chunks.setMatrixAt(n, m.compose(p.set(x, DISH.plateY + y + s * 0.15, z), q.setFromEuler(e.set(rand() * 3, rand() * 6, rand() * 3)), sc.set(s, s, s)));
-      chunks.setColorAt(n, c.copy(red).lerp(bright, rand() * 0.6));
+      chunks.setColorAt(n, c.copy(red).lerp(bright, rand() * 0.6).multiplyScalar(shadeAt(x, y, z)));
       n++;
     }
     chunks.count = n;
@@ -418,35 +492,37 @@ export function buildDish({ pasta, sauce, prepare = () => {} }) {
       const th = rand() * TAU, r = DISH.heroR + 0.02 + Math.sqrt(rand()) * (DISH.pileR * 1.0 - DISH.heroR);
       const x = Math.cos(th) * r, z = Math.sin(th) * r;
       const s = 0.006 + rand() * 0.009;
-      herbs.setMatrixAt(i, m.compose(p.set(x, DISH.plateY + surfaceAt(x, z) + 0.004, z), q.setFromEuler(e.set((rand() - 0.5) * 0.6, rand() * 6, (rand() - 0.5) * 0.6)), sc.set(s * 1.6, s * 0.25, s)));
-      herbs.setColorAt(i, c.copy(herb).lerp(herb2, rand()));
+      const hy = surfaceAt(x, z);
+      herbs.setMatrixAt(i, m.compose(p.set(x, DISH.plateY + hy + 0.004, z), q.setFromEuler(e.set((rand() - 0.5) * 0.6, rand() * 6, (rand() - 0.5) * 0.6)), sc.set(s * 1.6, s * 0.25, s)));
+      herbs.setColorAt(i, c.copy(herb).lerp(herb2, rand()).multiplyScalar(shadeAt(x, hy, z)));
     }
   }
-  chunks.castShadow = true; chunks.receiveShadow = true; herbs.receiveShadow = true;
   tilted.add(chunks, herbs);
 
   // basil, resting on the heap
-  const leafMat = new THREE.MeshPhysicalMaterial({ name: 'Basil', vertexColors: true, roughness: 0.36, clearcoat: 0.8, clearcoatRoughness: 0.22, side: THREE.DoubleSide, envMapIntensity: 0.85 });
-  prepare(leafMat);
+  const leafMat = new THREE.MeshStandardMaterial({ name: 'Basil', vertexColors: true, roughness: 0.3, side: THREE.DoubleSide, envMapIntensity: 0.9 });
   const leafGeo = buildLeafGeometry();
   const LEAVES = [   // [angle around the heap, distance out, size, heading, droop]
     [0.55, 0.66, 0.42, 2.0, 0.25], [2.45, 0.68, 0.38, -0.9, 0.3], [-1.9, 0.72, 0.34, 0.4, 0.2], [1.35, 0.86, 0.3, 3.0, 0.1],
   ];
   for (const [th, r, s, head, droop] of LEAVES) {
-    const leaf = new THREE.Mesh(leafGeo, leafMat);
+    const x0 = Math.cos(th) * r, z0 = Math.sin(th) * r;
+    const lm = leafMat.clone();
+    lm.color.setScalar(shadeAt(x0, surfaceAt(x0, z0) + 0.02, z0));
+    prepare(lm); addHeroShadow(lm);
+    const leaf = new THREE.Mesh(leafGeo, lm);
     leaf.scale.setScalar(s);
     const x = Math.cos(th) * r, z = Math.sin(th) * r;
     // follow the slope of the heap where it lands
     const gx = (HEAP.smooth(x + 0.03, z) - HEAP.smooth(x - 0.03, z)) / 0.06, gz = (HEAP.smooth(x, z + 0.03) - HEAP.smooth(x, z - 0.03)) / 0.06;
     leaf.position.set(x, DISH.plateY + surfaceAt(x, z) + 0.012, z);
     leaf.rotation.set(clamp(Math.atan(gz) * 0.6, -0.3, 0.3) - droop * 0.3, head, clamp(-Math.atan(gx) * 0.6, -0.3, 0.3), 'YXZ');
-    leaf.castShadow = true; leaf.receiveShadow = true;
     tilted.add(leaf);
   }
 
   // parmesan
   const flakeMat = new THREE.MeshStandardMaterial({ name: 'Parmesan', roughness: 0.7, color: '#ffffff' });
-  prepare(flakeMat);
+  prepare(flakeMat); addHeroShadow(flakeMat);
   const FLAKES = 170;
   const flakes = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 0), flakeMat, FLAKES);
   flakes.name = 'Parmesan';
@@ -454,14 +530,14 @@ export function buildDish({ pasta, sauce, prepare = () => {} }) {
   for (let i = 0; i < FLAKES; i++) {
     const th = rand() * TAU, r = DISH.heroR + 0.03 + Math.sqrt(rand()) * (DISH.pileR * 0.95 - DISH.heroR - 0.03);
     const x = Math.cos(th) * r, z = Math.sin(th) * r;
-    fp.set(x, DISH.plateY + surfaceAt(x, z) + 0.006, z);
+    const fy = surfaceAt(x, z);
+    fp.set(x, DISH.plateY + fy + 0.006, z);
     const s = 0.01 + rand() * 0.018;
     fs.set(s * (1 + rand()), s * 0.35, s * (0.7 + rand() * 0.6));
     fq.setFromEuler(fe.set((rand() - 0.5) * 0.8, rand() * TAU, (rand() - 0.5) * 0.8));
     flakes.setMatrixAt(i, fm.compose(fp, fq, fs));
-    flakes.setColorAt(i, c.set('#f3e7c6').multiplyScalar(0.88 + rand() * 0.14));
+    flakes.setColorAt(i, c.set('#f3e7c6').multiplyScalar((0.88 + rand() * 0.14) * shadeAt(x, fy, z)));
   }
-  flakes.receiveShadow = true;
   tilted.add(flakes);
 
   // outline for bounds: the plate's rim and the top of the heap, in the tilted space

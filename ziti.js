@@ -172,7 +172,8 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
       bakeToneMapping(m);
     });
     rig.attachModel(root, { prepare: bakeToneMapping });   // the plate, pasta and basil get the same tone curve
-    rig.useShadows(renderer, key);
+    rig.useLight(key);   // the noodle's shadow on its plate falls away from the key light
+    renderer.compile(scene, camera);   // build the shaders now, not on the first frame the ziti is seen
     status.ready = true;
     applyLook();
     onChange();
@@ -397,6 +398,8 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
   const curQuat = new THREE.Quaternion();
   const IDENT = new THREE.Quaternion();
   const drift = new THREE.Vector2();
+  let poseHook = null;
+  const poseE = new THREE.Euler();
   function update(now, dt, animate = true) {
     if (workerReady) {
       // one frame at a time: if the tracker is slower than the camera it just skips frames, the video never waits
@@ -423,6 +426,11 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
       snapshotFrame();
     }
     if (!animate) return;
+    if (poseHook) {   // the performance check drives the head instead of the camera
+      const p = poseHook(now);
+      target.quat.setFromEuler(poseE.set(p.pitch, p.yaw, p.roll, 'YXZ'));
+      target.pos.set(p.x, p.y); target.jaw = p.jaw; target.lean = p.lean; target.seen = now;
+    }
 
     const tracking = now - target.seen < Math.max(500, 3 * resultGap);
     const goal = tracking ? target.quat : IDENT;
@@ -459,6 +467,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
   return {
     status, update, renderTo, applyLook, straighten, startTracker,
     resetFilters: () => filters.clear(),
+    setPoseHook: (fn) => { poseHook = fn; },
     get landmarker() { return landmarker || (workerReady ? worker : null); },
     _internals: { onFace, insets, renderer, scene, camera, rig, target },
   };

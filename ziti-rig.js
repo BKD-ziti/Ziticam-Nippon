@@ -17,7 +17,7 @@
 // Shared, unchanged, by ZitiCam Pocket and ZitiCam Nippon.
 
 import * as THREE from 'three';
-import { buildDish, HERO_BASE_Y, fbm } from './ziti-plate.js';
+import { buildDish, HERO_BASE_Y, HERO_SHADOW, fbm } from './ziti-plate.js';
 
 // ---- rest shape (glTF space: +Y up, +Z = the face side). ziti v2 is modeled 1.64 tall, its face in the middle.
 // The head is the modeled noodle above CUT_TOP, untouched. The band between CUT_TOP and CUT_BOT is stretched into
@@ -199,7 +199,6 @@ export function createZitiRig() {
     skinned = new THREE.SkinnedMesh(buildBodyGeometry(src), stained);
     skinned.name = 'ZitiBody';
     skinned.frustumCulled = false;
-    skinned.castShadow = true; skinned.receiveShadow = true;
     object.add(skinned);
     // bind in the rest pose; from then on only the bones' local poses matter
     const keep = bones.map((b) => [b.position.clone(), b.quaternion.clone(), b.scale.clone()]);
@@ -212,7 +211,6 @@ export function createZitiRig() {
       const baked = sauceMesh.geometry.clone().applyMatrix4(sauceMesh.matrixWorld);
       sauceClassic = new THREE.Mesh(baked, sauceMesh.material); sauceClassic.name = 'Sauce';
       sauceBody = new THREE.Mesh(shortDrips(baked), sauceMesh.material); sauceBody.name = 'SauceBody';
-      sauceBody.castShadow = true; sauceBody.receiveShadow = true;
       headSpace.add(sauceClassic, sauceBody);
     }
 
@@ -251,7 +249,6 @@ export function createZitiRig() {
     if (dish) dish.group.visible = bodyOn;
     if (sauceClassic) sauceClassic.visible = sauceOn && !bodyOn;
     if (sauceBody) sauceBody.visible = sauceOn && bodyOn;
-    if (keyLight) keyLight.castShadow = bodyOn;   // the classic noodle stays exactly as it always looked
   }
   function setBody(on) {
     if (bodyOn !== !!on) reset();
@@ -260,18 +257,21 @@ export function createZitiRig() {
   }
   function setSauce(on) { sauceOn = !!on; showParts(); }
 
-  // soft shadows from the key light: the heap gets its depth, the noodle sits in it instead of on it
-  function useShadows(renderer, light) {
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    keyLight = light;
-    const sc = light.shadow.camera;
-    Object.assign(sc, { left: -2.4, right: 2.4, top: 2.4, bottom: -2.4, near: 0.5, far: 14 });
-    sc.updateProjectionMatrix();
-    light.shadow.mapSize.set(1024, 1024);
-    light.shadow.bias = -0.0005;
-    light.shadow.normalBias = 0.02;
-    showParts();
+  // the key light the noodle's shadow falls away from. No shadow map: the plate's own shadows are baked when
+  // it's built, and the noodle's is worked out per pixel from where it is (see ziti-plate.js), which costs a
+  // fraction of drawing and sampling a shadow map every frame.
+  function useLight(light) { keyLight = light; }
+  const heroA = new THREE.Vector3(), heroB = new THREE.Vector3();
+  function placeShadow() {
+    const U = HERO_SHADOW;
+    U.uZitiK.value = bodyOn ? 0.4 : 0;
+    if (!bodyOn) return;
+    // the visible noodle, from where it leaves the pasta to the top of its head, in world space
+    heroA.copy(bodyBone.position);
+    heroB.set(0, 0.9 - HEAD_PIVOT, 0).multiply(headBone.scale).applyQuaternion(headBone.quaternion).add(headBone.position);
+    U.uZitiA.value.copy(heroA).applyMatrix4(object.matrixWorld);
+    U.uZitiB.value.copy(heroB).applyMatrix4(object.matrixWorld);
+    if (keyLight) U.uZitiL.value.copy(keyLight.getWorldPosition(tmpB)).normalize();
   }
 
   // camera framing for the current mode and picture shape (the apps add their own zoom and up/down on top)
@@ -315,6 +315,7 @@ export function createZitiRig() {
       headBone.quaternion.copy(quat);
       tmpA.set(0, HEAD_PIVOT, 0).multiply(headBone.scale).applyQuaternion(quat);
       headBone.position.set(x, y, 0).add(tmpA);
+      placeShadow();
       return;
     }
 
@@ -354,6 +355,7 @@ export function createZitiRig() {
     tmpB.set(0, NECK_Y - HEAD_PIVOT, 0).applyQuaternion(quat).add(headBone.position);
     neckBone.position.addVectors(tmpA, tmpB).multiplyScalar(0.5);
     neckBone.quaternion.copy(qN.slerpQuaternions(qB, quat, 0.5));
+    placeShadow();
   }
 
   function reset() { for (const s of Object.values(S)) s.reset(); }
@@ -371,7 +373,7 @@ export function createZitiRig() {
   }
 
   return {
-    object, headSpace, bodySpace, bones, attachModel, setBody, setSauce, useShadows, frameFor, update, reset, hullWorld,
+    object, headSpace, bodySpace, bones, attachModel, setBody, setSauce, useLight, frameFor, update, reset, hullWorld,
     get body() { return bodyOn; },
     get ready() { return !!skinned; },
     // how far the eyes and mouth sit above where the classic noodle has them
