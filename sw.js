@@ -1,7 +1,7 @@
 // Offline support: after one visit online, the app, the ziti and the face tracker all open with no signal.
-const VERSION = 'nippon-0.6.0';
+const VERSION = 'nippon-0.7.0';
 const CORE = [
-  './', './index.html', './app.js', './ziti.js', './stage.js', './tracker-worker.js', './take-writer.js', './recorder-wc.js', './audio-tap.js', './vendor/mediabunny.min.mjs', './reader.js', './manifest.webmanifest',
+  './', './index.html', './app.js', './ziti.js', './ziti-rig.js', './ziti-plate.js', './stage.js', './tracker-worker.js', './take-writer.js', './recorder-wc.js', './audio-tap.js', './vendor/mediabunny.min.mjs', './reader.js', './manifest.webmanifest',
   './three.module.min.js', './GLTFLoader.js', './RoomEnvironment.js', './BufferGeometryUtils.js',
   './icon-180.png', './icon-512.png',
   './ziti.glb', './face_landmarker.task',

@@ -1,9 +1,10 @@
-// The live-face ziti: same model, tracker and tuning as ZitiCam Pocket, drawn straight onto
-// the stage over the page, so it never needs a key color.
+// The live-face ziti: same model, rig, tracker and tuning as ZitiCam Pocket, drawn straight onto
+// the stage over the page, so it never needs a key color. The head, neck and body live in ziti-rig.js.
 
 import * as THREE from 'three';
 import { GLTFLoader } from './GLTFLoader.js';
 import { RoomEnvironment } from './RoomEnvironment.js';
+import { createZitiRig } from './ziti-rig.js';
 
 export const ZITI_ASPECT = 3 / 4;   // width / height of the ziti box
 const MP_VER = '0.10.35';
@@ -105,21 +106,21 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
   const key = new THREE.DirectionalLight(0xffe7cc, 2.4); key.position.set(-2.2, 3.2, 4.0); world.add(key);
   const fill = new THREE.DirectionalLight(0xd8e4ff, 0.7); fill.position.set(3.0, 0.5, 2.5); world.add(fill);
   const rim = new THREE.DirectionalLight(0xffffff, 1.6); rim.position.set(1.2, 2.5, -3.5); world.add(rim);
-  const rig = new THREE.Group();
-  const bob = new THREE.Group();
-  rig.add(bob);
-  world.add(rig);
-  let sauceNode = null;
+  // head, neck and body: the head follows your face, the body follows the head (see ziti-rig.js)
+  const rig = createZitiRig();
+  world.add(rig.object);
 
   function applyFraming() {
-    camera.fov = 28 / Math.max(0.3, CFG.zoom);
-    camera.position.set(0, 0.25 - CFG.lift, 6.0);
-    camera.lookAt(0, 0.05 - CFG.lift, 0);
+    const f = rig.frameFor(ZITI_ASPECT);   // the whole plate fits the ziti box, with room for the head to roam
+    camera.fov = f.fov / Math.max(0.3, CFG.zoom);
+    camera.position.set(0, f.camY - CFG.lift, f.camZ);
+    camera.lookAt(0, f.lookY - CFG.lift, 0);
     camera.updateProjectionMatrix();
   }
   function applyLook() {
     world.scale.x = CFG.flip ? -1 : 1;
-    if (sauceNode) sauceNode.visible = CFG.sauce;
+    rig.setBody(CFG.body !== false);
+    rig.setSauce(CFG.sauce);
     applyFraming();
   }
 
@@ -154,7 +155,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1, 24, 12), mat);
     mesh.frustumCulled = false;
     mesh.renderOrder = 10;
-    bob.add(mesh);
+    rig.headSpace.add(mesh);   // the eyes and mouth ride the head
     return mesh;
   }
   const insets = { eyeR: makeInset('eyeR', 0.28), eyeL: makeInset('eyeL', 0.28), mouth: makeInset('mouth', 0.26) };
@@ -170,8 +171,8 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
       m.envMapIntensity = 0.9;
       bakeToneMapping(m);
     });
-    sauceNode = root.getObjectByName('Sauce');
-    bob.add(root);
+    rig.attachModel(root, { prepare: bakeToneMapping });   // the plate, pasta and basil get the same tone curve
+    rig.useShadows(renderer, key);
     status.ready = true;
     applyLook();
     onChange();
@@ -190,7 +191,9 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
   const euler = new THREE.Euler(0, 0, 0, 'YXZ');
 
   // ---- head pose + insets
-  const target = { quat: new THREE.Quaternion(), pos: new THREE.Vector2(), jaw: 0, seen: -1e9 };
+  const target = { quat: new THREE.Quaternion(), pos: new THREE.Vector2(), jaw: 0, lean: 0, seen: -1e9 };
+  // leaning in or out: face width against a slowly moving "normal distance", reset by Set straight
+  const leanRef = { w: 0, size: 0, t: 0 };
   const neutralInv = new THREE.Quaternion();
   const savedNeutral = store.get('nippon.neutral', null);
   if (Array.isArray(savedNeutral)) neutralInv.fromArray(savedNeutral);
@@ -218,6 +221,10 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
     target.quat.setFromEuler(euler);
 
     const faceW = smooth('faceW', P3(LM.cheekL).distanceTo(P3(LM.cheekR)), t, 0.7, 0.004);
+    if (!leanRef.w || leanRef.size !== W) { leanRef.w = faceW; leanRef.size = W; leanRef.t = t; }
+    leanRef.w += (faceW - leanRef.w) * (1 - Math.exp(-Math.max(0, t - leanRef.t) / 8000));
+    leanRef.t = t;
+    target.lean = Math.log(faceW / leanRef.w);
     const eR = P2(LM.rEyeOuter).add(P2(LM.rEyeInner)).multiplyScalar(0.5);
     const eL = P2(LM.lEyeOuter).add(P2(LM.lEyeInner)).multiplyScalar(0.5);
     const roll = Math.atan2(eL.y - eR.y, eL.x - eR.x);
@@ -248,7 +255,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
       const hw = smooth(k + 'hw', halfW, t, 0.5, 0.002), hh = smooth(k + 'hh', halfH, t, 0.5, 0.002);
       return {
         crop: [cx, cy, hw, hh],
-        center: [FACE_REF.x + smooth(k + 'fx', f.x, t, 0.6, 0.5) * FACE_SPAN * CFG.eyeSpread, FACE_REF.y - smooth(k + 'fy', f.y, t, 0.6, 0.5) * FACE_SPAN + CFG.eyeLift],
+        center: [FACE_REF.x + smooth(k + 'fx', f.x, t, 0.6, 0.5) * FACE_SPAN * CFG.eyeSpread, FACE_REF.y - smooth(k + 'fy', f.y, t, 0.6, 0.5) * FACE_SPAN + CFG.eyeLift + rig.faceLift],
         size: [(2 * hw / faceW) * FACE_SPAN * s, (2 * hh / faceW) * FACE_SPAN * s],
       };
     };
@@ -269,7 +276,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
       const hw = smooth('mhw', halfW, t, 0.6, 0.003), hh = smooth('mhh', halfH, t, 3.0, 0.05);
       insets.mouth.userData.v = {
         crop: [cx, cy, hw, hh],
-        center: [FACE_REF.x + smooth('mfx', f.x, t, 0.6, 0.5) * FACE_SPAN, FACE_REF.y - smooth('mfy', f.y, t, 0.6, 0.5) * FACE_SPAN + CFG.mouthLift],
+        center: [FACE_REF.x + smooth('mfx', f.x, t, 0.6, 0.5) * FACE_SPAN, FACE_REF.y - smooth('mfy', f.y, t, 0.6, 0.5) * FACE_SPAN + CFG.mouthLift + rig.faceLift],
         size: [(2 * hw / faceW) * FACE_SPAN * s, (2 * hh / faceW) * FACE_SPAN * s],
       };
     }
@@ -389,6 +396,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
   let lastVideoTime = -1;
   const curQuat = new THREE.Quaternion();
   const IDENT = new THREE.Quaternion();
+  const drift = new THREE.Vector2();
   function update(now, dt, animate = true) {
     if (workerReady) {
       // one frame at a time: if the tracker is slower than the camera it just skips frames, the video never waits
@@ -420,13 +428,14 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
     const goal = tracking ? target.quat : IDENT;
     const follow = 1 - Math.exp(-dt * (16 - 10 * Math.min(1, Math.max(0, CFG.smooth))));
     curQuat.slerp(goal, tracking ? follow : 1 - Math.exp(-dt * 2));
-    rig.quaternion.copy(curQuat);
     const px = tracking ? target.pos.x * CFG.sway * 0.6 : 0, py = tracking ? target.pos.y * CFG.sway * 0.45 : 0;
-    rig.position.x += (px - rig.position.x) * follow;
-    rig.position.y += (py - rig.position.y) * follow;
-    const jaw = tracking ? target.jaw : 0;
-    const sy = 1 + 0.035 * jaw * CFG.bounce, sxz = 1 - 0.015 * jaw * CFG.bounce;
-    bob.scale.set(sxz + (bob.scale.x - sxz) * 0.5, sy + (bob.scale.y - sy) * 0.5, sxz + (bob.scale.z - sxz) * 0.5);
+    drift.x += (px - drift.x) * follow;
+    drift.y += (py - drift.y) * follow;
+    rig.update({
+      quat: curQuat, x: drift.x, y: drift.y,
+      jaw: tracking ? target.jaw : 0,
+      lean: tracking ? target.lean * CFG.sway * 1.6 : 0,
+    }, { bounce: CFG.bounce, follow: CFG.follow ?? 0.5, wobble: CFG.wobble ?? 0.5 }, dt, now);
 
     applyInsets(now);
   }
@@ -441,6 +450,7 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
   function straighten() {
     if (performance.now() - lastRawT > 1000) return false;
     neutralInv.copy(lastRawQuat).invert();
+    leanRef.w = 0;   // and this distance from the camera is "not leaning"
     store.set('nippon.neutral', neutralInv.toArray());
     return true;
   }
@@ -450,6 +460,6 @@ export function createZiti({ renderer, CFG, store, videoEl, mpBase, onChange = (
     status, update, renderTo, applyLook, straighten, startTracker,
     resetFilters: () => filters.clear(),
     get landmarker() { return landmarker || (workerReady ? worker : null); },
-    _internals: { onFace, insets, renderer, scene, camera, rig },
+    _internals: { onFace, insets, renderer, scene, camera, rig, target },
   };
 }
